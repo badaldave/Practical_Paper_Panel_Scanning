@@ -13,9 +13,12 @@ class PaddleOCRProvider(OCRProvider):
         self.logger = logging.getLogger("PaddleOCRProvider")
         if PADDLE_AVAILABLE:
             try:
-                # Initialize CPU-only PaddleOCR with english language configuration
-                self.ocr = PaddleOCR(use_angle_cls=True, lang='en', enable_mkldnn=False)
-                self.logger.info("PaddleOCR engine loaded successfully.")
+                # CPU-only PaddleOCR (no NVIDIA GPU on target hosts). MKL-DNN
+                # (oneDNN) accelerates inference on Intel CPUs with no accuracy
+                # change; cpu_threads is bounded below the 12 logical cores to
+                # leave headroom for the rest of the worker/host.
+                self.ocr = PaddleOCR(use_angle_cls=True, lang='en', enable_mkldnn=True, cpu_threads=8)
+                self.logger.info("PaddleOCR engine loaded successfully (MKL-DNN enabled, cpu_threads=8).")
             except Exception as e:
                 self.logger.error(f"Failed to load PaddleOCR engine: {e}")
                 self.ocr = None

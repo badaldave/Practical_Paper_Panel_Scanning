@@ -17,6 +17,10 @@ type Document struct {
 	MimeType   string     `json:"mime_type"`
 	Status             string     `json:"status"` // 'uploaded', 'queued', 'processing', 'extracted', 'failed', 'verified'
 	ProgressPercentage int        `json:"progress_percentage"`
+	// ErrorMessage carries the reason a document's processing job failed, sourced
+	// from the latest processing_jobs row. Populated for surfacing in the UI; nil
+	// when there is no failure to report.
+	ErrorMessage       *string    `json:"error_message,omitempty"`
 	TemplateID         *uuid.UUID `json:"template_id,omitempty"`
 	UploadedBy         uuid.UUID  `json:"uploaded_by"`
 	CreatedAt          time.Time  `json:"created_at"`

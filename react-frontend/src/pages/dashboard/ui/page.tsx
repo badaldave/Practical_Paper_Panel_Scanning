@@ -13,6 +13,7 @@ interface DocumentRecord {
   mime_type: string;
   status: string; // 'uploaded', 'queued', 'processing', 'extracted', 'failed', 'verified'
   progress_percentage: number;
+  error_message?: string; // reason the OCR job failed (only set when status === 'failed')
   created_at: string;
 }
 
@@ -177,7 +178,7 @@ export const DashboardPage: React.FC = () => {
       case 'verified':
         return <span className="px-2 py-1 bg-emerald-950 border border-emerald-900 text-emerald-400 text-[10px] font-semibold uppercase tracking-wider rounded-md">Verified</span>;
       case 'failed':
-        return <span className="px-2 py-1 bg-red-950 border border-red-900 text-red-400 text-[10px] font-semibold uppercase tracking-wider rounded-md">Failed</span>;
+        return <span title={doc.error_message || 'Processing failed'} className="px-2 py-1 bg-red-950 border border-red-900 text-red-400 text-[10px] font-semibold uppercase tracking-wider rounded-md cursor-help">Failed</span>;
       default:
         return <span className="px-2 py-1 bg-slate-700 text-slate-300 text-[10px] font-semibold rounded-md">{doc.status}</span>;
     }
@@ -410,6 +411,14 @@ export const DashboardPage: React.FC = () => {
                           </td>
                           <td className="px-4 py-3">
                             {getStatusBadge(doc)}
+                            {doc.status === 'failed' && doc.error_message && (
+                              <p
+                                className="text-[10px] text-red-400/80 mt-1 max-w-[220px] line-clamp-2 break-words"
+                                title={doc.error_message}
+                              >
+                                {doc.error_message}
+                              </p>
+                            )}
                           </td>
                           <td className="px-4 py-3 text-right flex items-center justify-end gap-2">
                             {['extracted', 'verified'].includes(doc.status) ? (
@@ -420,7 +429,7 @@ export const DashboardPage: React.FC = () => {
                                 <Play className="w-2.5 h-2.5 fill-current" /> Verify
                               </button>
                             ) : doc.status === 'failed' ? (
-                              <span className="text-[11px] text-red-400 font-semibold bg-red-950/20 border border-red-900/30 px-2 py-0.5 rounded-md">Failed</span>
+                              <span title={doc.error_message || 'Processing failed'} className="text-[11px] text-red-400 font-semibold bg-red-950/20 border border-red-900/30 px-2 py-0.5 rounded-md cursor-help">Failed</span>
                             ) : (
                               <span className="text-[11px] text-slate-400 animate-pulse font-semibold pr-2">Processing ({doc.progress_percentage}%)</span>
                             )}

@@ -20,24 +20,27 @@ if (-not (Test-Path $Launcher)) {
 $action  = New-ScheduledTaskAction -Execute "powershell.exe" `
     -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$Launcher`""
 
-# Start at system boot AND keep running. RestartCount/Interval cover the rare
+# Start at user logon AND keep running. RestartCount/Interval cover the rare
 # case where the whole powershell host dies (the launcher handles worker crashes).
-$trigger  = New-ScheduledTaskTrigger -AtStartup
+$trigger  = New-ScheduledTaskTrigger -AtLogOn
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries `
     -DontStopIfGoingOnBatteries -StartWhenAvailable `
     -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) `
     -ExecutionTimeLimit (New-TimeSpan -Seconds 0)
 
-# Run as SYSTEM so it starts without anyone logged in.
-$principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+# Run as the CURRENT user, in their session, so the worker sees the same venv,
+# PaddleOCR model cache (%USERPROFILE%\.paddleocr) and per-user CUDA install it
+# gets when launched by hand. Interactive logon = starts when you log in; needs
+# no stored password and no admin/elevation to register.
+# RunLevel Limited: the worker needs no admin rights (only the user venv/CUDA/
+# models), and Limited lets a standard, non-elevated user register their own
+# logon task. Use -RunLevel Highest only if you install from an elevated shell.
+$CurrentUser = "$env:USERDOMAIN\$env:USERNAME"
+$principal = New-ScheduledTaskPrincipal -UserId $CurrentUser -LogonType Interactive -RunLevel Limited
 
 Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger `
     -Settings $settings -Principal $principal -Force | Out-Null
 
-Write-Host "Registered scheduled task '$TaskName'." -ForegroundColor Green
+Write-Host "Registered scheduled task '$TaskName' to run as $CurrentUser at logon." -ForegroundColor Green
 Write-Host "Start it now with:  Start-ScheduledTask -TaskName $TaskName"
 Write-Host "View status with:   Get-ScheduledTask -TaskName $TaskName | Get-ScheduledTaskInfo"
-Write-Host ""
-Write-Host "NOTE: SYSTEM-account tasks may not see a per-user CUDA install. If the" -ForegroundColor Yellow
-Write-Host "worker falls back to CPU, run it under your own user account instead" -ForegroundColor Yellow
-Write-Host "(re-register with -UserId '<DOMAIN\\you>' -LogonType S4U)." -ForegroundColor Yellow

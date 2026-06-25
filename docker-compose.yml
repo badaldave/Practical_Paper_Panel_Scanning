@@ -41,27 +41,31 @@ services:
     networks:
       - ocr_network
 
-#  python-worker:
-#    build:
-#      context: ./python-worker
-#      dockerfile: Dockerfile
-#    container_name: university_ocr_worker
-#    environment:
-#      DATABASE_URL: "postgresql://postgres:postgres_secure_db_pass_2026@db:5432/university_ocr"
-#      UPLOAD_DIR: "/var/data/uploads"
-#      POLL_INTERVAL: "5"
-#      WORKER_ID: "docker-ocr-worker-01"
-#      OCR_PRIORITY: "paddle,surya,doctr,tesseract"
-#    volumes:
-#      - ./go-backend/uploads:/var/data/uploads
-#      - ./python-worker/app:/app/app
-#      - cache_volume:/root/.cache
-#      - paddlex_volume:/root/.paddlex
-#    depends_on:
-#      db:
-#        condition: service_healthy
-#    networks:
-#      - ocr_network
+  # CPU OCR worker. Runs inside compose so `docker compose up` starts the whole
+  # stack (db + backend + worker). This is the CPU image (no GPU passthrough);
+  # for GPU use docker-compose.gpu.yml or run run_local_worker.ps1 on the host.
+  python-worker:
+    build:
+      context: ./python-worker
+      dockerfile: Dockerfile
+    container_name: university_ocr_worker
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: "postgresql://postgres:postgres_secure_db_pass_2026@db:5432/university_ocr"
+      UPLOAD_DIR: "/var/data/uploads"
+      POLL_INTERVAL: "5"
+      WORKER_ID: "docker-ocr-worker-01"
+      OCR_PRIORITY: "paddle,surya,doctr,tesseract"
+    volumes:
+      - ./go-backend/uploads:/var/data/uploads
+      - ./python-worker/app:/app/app
+      - cache_volume:/root/.cache
+      - paddlex_volume:/root/.paddlex
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - ocr_network
 
 networks:
   ocr_network:

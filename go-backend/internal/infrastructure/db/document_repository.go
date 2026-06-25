@@ -49,23 +49,31 @@ func (r *DocumentRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain
 	var query string
 	var args []interface{}
 
+	// error_message (latest job) is surfaced only for failed documents.
+	errMsgSubquery := `, CASE WHEN d.status = 'failed' THEN (
+			SELECT pj.error_message FROM processing_jobs pj
+			WHERE pj.document_id = d.id
+			ORDER BY pj.created_at DESC LIMIT 1
+		) END AS error_message`
+
 	if err == nil {
 		query = `
-			SELECT id, tenant_id, name, file_path, file_size, mime_type, status, progress_percentage, template_id, uploaded_by, created_at, updated_at
-			FROM documents
-			WHERE id = $1 AND tenant_id = $2
+			SELECT d.id, d.tenant_id, d.name, d.file_path, d.file_size, d.mime_type, d.status, d.progress_percentage, d.template_id, d.uploaded_by, d.created_at, d.updated_at` + errMsgSubquery + `
+			FROM documents d
+			WHERE d.id = $1 AND d.tenant_id = $2
 		`
 		args = []interface{}{id, tenantID}
 	} else {
 		query = `
-			SELECT id, tenant_id, name, file_path, file_size, mime_type, status, progress_percentage, template_id, uploaded_by, created_at, updated_at
-			FROM documents
-			WHERE id = $1
+			SELECT d.id, d.tenant_id, d.name, d.file_path, d.file_size, d.mime_type, d.status, d.progress_percentage, d.template_id, d.uploaded_by, d.created_at, d.updated_at` + errMsgSubquery + `
+			FROM documents d
+			WHERE d.id = $1
 		`
 		args = []interface{}{id}
 	}
 
 	var doc domain.Document
+	var errMsg sql.NullString
 	err = r.db.QueryRowContext(ctx, query, args...).Scan(
 		&doc.ID,
 		&doc.TenantID,
@@ -79,12 +87,16 @@ func (r *DocumentRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain
 		&doc.UploadedBy,
 		&doc.CreatedAt,
 		&doc.UpdatedAt,
+		&errMsg,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("failed to get document by ID: %w", err)
+	}
+	if errMsg.Valid && errMsg.String != "" {
+		doc.ErrorMessage = &errMsg.String
 	}
 
 	return &doc, nil
@@ -96,11 +108,18 @@ func (r *DocumentRepository) GetByTenant(ctx context.Context, tenantID uuid.UUID
 		return nil, errors.New("tenant mismatch in listing documents")
 	}
 
+	// Only surface the latest job's error_message for documents that actually
+	// failed, so a stale message left on a since-succeeded job is never shown.
 	query := `
-		SELECT id, tenant_id, name, file_path, file_size, mime_type, status, progress_percentage, template_id, uploaded_by, created_at, updated_at
-		FROM documents
-		WHERE tenant_id = $1
-		ORDER BY created_at DESC
+		SELECT d.id, d.tenant_id, d.name, d.file_path, d.file_size, d.mime_type, d.status, d.progress_percentage, d.template_id, d.uploaded_by, d.created_at, d.updated_at,
+			CASE WHEN d.status = 'failed' THEN (
+				SELECT pj.error_message FROM processing_jobs pj
+				WHERE pj.document_id = d.id
+				ORDER BY pj.created_at DESC LIMIT 1
+			) END AS error_message
+		FROM documents d
+		WHERE d.tenant_id = $1
+		ORDER BY d.created_at DESC
 		LIMIT $2 OFFSET $3
 	`
 	rows, err := r.db.QueryContext(ctx, query, tenantID, limit, offset)
@@ -112,6 +131,7 @@ func (r *DocumentRepository) GetByTenant(ctx context.Context, tenantID uuid.UUID
 	var docs []*domain.Document
 	for rows.Next() {
 		var doc domain.Document
+		var errMsg sql.NullString
 		err := rows.Scan(
 			&doc.ID,
 			&doc.TenantID,
@@ -125,9 +145,13 @@ func (r *DocumentRepository) GetByTenant(ctx context.Context, tenantID uuid.UUID
 			&doc.UploadedBy,
 			&doc.CreatedAt,
 			&doc.UpdatedAt,
+			&errMsg,
 		)
 		if err != nil {
 			return nil, err
+		}
+		if errMsg.Valid && errMsg.String != "" {
+			doc.ErrorMessage = &errMsg.String
 		}
 		docs = append(docs, &doc)
 	}
