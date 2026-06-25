@@ -1,0 +1,80 @@
+# ---------------------------------------------------------------------------
+# Secrets & local config
+# ---------------------------------------------------------------------------
+.env
+.env.local
+**/.env
+**/.env.local
+!.env.example
+# (.env.example IS committed as the template)
+
+# ---------------------------------------------------------------------------
+# Go backend (go-backend/)
+# ---------------------------------------------------------------------------
+# Compiled binaries / build output
+go-backend/api-server
+go-backend/api-server.exe
+go-backend/cmd/**/*.exe
+*.exe
+*.out
+*.test
+# Go workspace / vendored deps (only if introduced)
+vendor/
+go.work
+go.work.sum
+# Uploaded source documents & rendered pages (user data, not source)
+go-backend/uploads/
+
+# ---------------------------------------------------------------------------
+# Python worker (python-worker/)
+# ---------------------------------------------------------------------------
+python-worker/venv/
+**/venv/
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ---------------------------------------------------------------------------
+# Pipeline tuning harness (tmp_eval/) — keep the *.py source, drop artifacts
+# ---------------------------------------------------------------------------
+tmp_eval/*.log
+tmp_eval/*.json
+tmp_eval/mismatches*.txt
+tmp_eval/pages_150/
+# Ad-hoc OCR probe image dumps
+python-worker/tmp_probe/
+
+# ---------------------------------------------------------------------------
+# React frontend (react-frontend/)
+# ---------------------------------------------------------------------------
+react-frontend/node_modules/
+**/node_modules/
+react-frontend/dist/
+react-frontend/dist-ssr/
+react-frontend/.vite/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ---------------------------------------------------------------------------
+# Editors / IDEs
+# ---------------------------------------------------------------------------
+.vscode/
+!.vscode/extensions.json
+.idea/
+*.swp
+*.swo
+*~
+
+# ---------------------------------------------------------------------------
+# OS cruft
+# ---------------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+desktop.ini

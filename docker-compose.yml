@@ -1,0 +1,74 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: university_ocr_db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres_secure_db_pass_2026
+      POSTGRES_DB: university_ocr
+    ports:
+      - "5439:5432" # Shifted host port to 5439 to avoid conflict
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - ocr_network
+
+  go-backend:
+    build:
+      context: ./go-backend
+      dockerfile: Dockerfile
+    container_name: university_ocr_backend
+    environment:
+      PORT: "8081"
+      DATABASE_URL: "host=db port=5432 user=postgres password=postgres_secure_db_pass_2026 dbname=university_ocr sslmode=disable"
+      JWT_SECRET: "platform_jwt_secure_signing_secret_key_2026"
+      UPLOAD_DIR: "/var/data/uploads"
+      MOCK_WORKER: "false"
+    ports:
+      - "8081:8081"
+    volumes:
+      - ./go-backend/uploads:/var/data/uploads
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - ocr_network
+
+#  python-worker:
+#    build:
+#      context: ./python-worker
+#      dockerfile: Dockerfile
+#    container_name: university_ocr_worker
+#    environment:
+#      DATABASE_URL: "postgresql://postgres:postgres_secure_db_pass_2026@db:5432/university_ocr"
+#      UPLOAD_DIR: "/var/data/uploads"
+#      POLL_INTERVAL: "5"
+#      WORKER_ID: "docker-ocr-worker-01"
+#      OCR_PRIORITY: "paddle,surya,doctr,tesseract"
+#    volumes:
+#      - ./go-backend/uploads:/var/data/uploads
+#      - ./python-worker/app:/app/app
+#      - cache_volume:/root/.cache
+#      - paddlex_volume:/root/.paddlex
+#    depends_on:
+#      db:
+#        condition: service_healthy
+#    networks:
+#      - ocr_network
+
+networks:
+  ocr_network:
+    driver: bridge
+
+volumes:
+  pgdata:
+    driver: local
+  cache_volume:
+  paddlex_volume:
