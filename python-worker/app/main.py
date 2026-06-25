@@ -29,8 +29,29 @@ def main():
 
 	poll_interval = Config.POLL_INTERVAL
 
+	# Self-healing: on startup, reclaim any jobs a previous (crashed) worker left
+	# stuck in 'processing' so they don't sit there forever.
+	try:
+		reclaimed = WorkerRepository.reap_stale_jobs()
+		if reclaimed:
+			logger.warning(f"Startup reaper reclaimed {reclaimed} stale job(s) left in 'processing'.")
+	except Exception as reap_err:
+		logger.error(f"Startup reaper failed: {reap_err}")
+
+	last_reap = time.monotonic()
+
 	while True:
 		try:
+			# Periodically reclaim stale jobs (e.g. a sibling worker died mid-job).
+			if time.monotonic() - last_reap >= Config.REAP_INTERVAL_SECONDS:
+				try:
+					reclaimed = WorkerRepository.reap_stale_jobs()
+					if reclaimed:
+						logger.warning(f"Reaper reclaimed {reclaimed} stale job(s) left in 'processing'.")
+				except Exception as reap_err:
+					logger.error(f"Reaper failed: {reap_err}")
+				last_reap = time.monotonic()
+
 			# Poll for a job
 			job = WorkerRepository.dequeue_job()
 			

@@ -1,0 +1,18 @@
+# GPU deployment dependency set (CUDA 11.8).
+# NOTE: paddlepaddle-gpu and torch/torchvision are intentionally NOT listed here —
+# they are installed in Dockerfile.gpu from their CUDA-specific index URLs so the
+# correct GPU builds are used. This file is everything else.
+opencv-python-headless>=4.9.0.80
+numpy>=1.26.4
+pandas>=2.2.1
+psycopg[binary]>=3.1.18
+python-dotenv>=1.0.1
+pydantic>=2.6.4
+pytesseract>=0.3.10
+pymupdf>=1.24.1
+# Pin to the 2.x line: the code uses the paddleocr 2.x API and pairs with
+# paddlepaddle-gpu 2.6.2. paddleocr 3.x changes the API and expects paddle 3.x.
+paddleocr>=2.7.3,<3
+surya-ocr==0.17.1
+python-doctr>=0.8.1
+transformers==4.56.1

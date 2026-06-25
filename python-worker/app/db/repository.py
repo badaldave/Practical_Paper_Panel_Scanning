@@ -1,5 +1,5 @@
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from uuid import uuid4
 import psycopg
 from app.config import Config
@@ -35,6 +35,49 @@ class WorkerRepository:
                     conn.commit()
                     return row
         return None
+
+    @staticmethod
+    def reap_stale_jobs(timeout_minutes: int = None) -> int:
+        """Self-healing: reclaim jobs stuck in 'processing' whose lock has gone stale
+        (i.e. the worker that claimed them died mid-job). They are re-queued so they
+        get picked up again instead of staying stuck forever. Jobs that have already
+        exhausted their attempts are failed permanently. Returns count reclaimed."""
+        if timeout_minutes is None:
+            timeout_minutes = Config.JOB_STALE_TIMEOUT_MINUTES
+
+        now = datetime.utcnow()
+        cutoff = now - timedelta(minutes=timeout_minutes)
+        query = """
+            UPDATE processing_jobs
+            SET status = CASE WHEN attempts < max_attempts THEN 'retrying' ELSE 'failed' END,
+                error_message = 'Reclaimed: worker lock expired (stale processing job)',
+                locked_at = NULL,
+                locked_by = NULL,
+                run_at = %s,
+                updated_at = %s
+            WHERE status = 'processing'
+              AND locked_at IS NOT NULL
+              AND locked_at < %s
+            RETURNING id, document_id, status
+        """
+        with DBConnection.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, (now, now, cutoff))
+                reaped = cur.fetchall()
+                for r in reaped:
+                    if r["status"] == "failed":
+                        cur.execute(
+                            "UPDATE documents SET status = 'failed', updated_at = %s WHERE id = %s",
+                            (now, r["document_id"])
+                        )
+                    else:
+                        # Hand it back to the queue UI as queued for reprocessing
+                        cur.execute(
+                            "UPDATE documents SET status = 'queued', updated_at = %s WHERE id = %s",
+                            (now, r["document_id"])
+                        )
+                conn.commit()
+        return len(reaped)
 
     @staticmethod
     def record_job_attempt(job_id: str, attempt_num: int):

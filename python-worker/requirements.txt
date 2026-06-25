@@ -7,8 +7,9 @@ pydantic>=2.6.4
 pytesseract>=0.3.10
 pymupdf>=1.24.1
 # For full installation, PaddleOCR, Surya-OCR, and DocTR can be resolved via CPU-compatible PyTorch builds
-paddlepaddle>=2.6.0
-paddleocr>=2.7.3
+paddlepaddle>=2.6.0,<3
+# Pin paddleocr to 2.x: code uses the 2.x API; 3.x changes it and needs paddle 3.x.
+paddleocr>=2.7.3,<3
 surya-ocr==0.17.1
 python-doctr[torch]>=0.8.1
 transformers==4.56.1

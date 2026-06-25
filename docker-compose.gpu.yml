@@ -1,0 +1,37 @@
+# GPU worker override. Use ALONGSIDE the base compose file:
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+#
+# Adds the Python OCR worker as a GPU container. Requires the NVIDIA Container
+# Toolkit on the host. Set MOCK_WORKER stays "false" in the base backend so this
+# real worker owns the queue.
+services:
+  python-worker:
+    build:
+      context: ./python-worker
+      dockerfile: Dockerfile.gpu
+    container_name: university_ocr_worker
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: "postgresql://postgres:postgres_secure_db_pass_2026@db:5432/university_ocr"
+      UPLOAD_DIR: "/var/data/uploads"
+      POLL_INTERVAL: "5"
+      WORKER_ID: "docker-gpu-worker-01"
+      OCR_PRIORITY: "paddle,surya,doctr,tesseract"
+      # Self-healing reaper knobs (see app/config.py)
+      JOB_STALE_TIMEOUT_MINUTES: "30"
+      REAP_INTERVAL_SECONDS: "60"
+    volumes:
+      # Must match the backend's upload mount so the worker can read the files.
+      - ./go-backend/uploads:/var/data/uploads
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - ocr_network
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

@@ -1,0 +1,25 @@
+# Keep the Docker build context small — don't ship the local dev venv, caches,
+# or model/OCR caches into the image build.
+venv/
+.venv/
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Local config / secrets (env is passed via compose, not baked in)
+.env
+*.log
+
+# OCR / model caches and tuning artifacts
+.cache/
+.paddlex/
+*.json.cache
+ocr_cache_*.json
+
+# Misc dev cruft
+.git/
+.gitignore
+.pytest_cache/
+.mypy_cache/
+*.md

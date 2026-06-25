@@ -1,9 +1,8 @@
-version: '3.8'
-
 services:
   db:
     image: postgres:16-alpine
     container_name: university_ocr_db
+    restart: unless-stopped
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres_secure_db_pass_2026
@@ -25,6 +24,7 @@ services:
       context: ./go-backend
       dockerfile: Dockerfile
     container_name: university_ocr_backend
+    restart: unless-stopped
     environment:
       PORT: "8081"
       DATABASE_URL: "host=db port=5432 user=postgres password=postgres_secure_db_pass_2026 dbname=university_ocr sslmode=disable"

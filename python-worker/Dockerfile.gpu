@@ -1,0 +1,48 @@
+# GPU build of the OCR worker. Runs on any NVIDIA host that has the NVIDIA driver
+# + NVIDIA Container Toolkit installed (Linux, or Windows via WSL2). The image
+# carries CUDA + cuDNN, so the host needs NO Python/CUDA install of its own.
+#
+# Defaults target CUDA 11.8 (matches paddlepaddle-gpu 2.6.2). To move to another
+# CUDA line, override the build args — all three must agree:
+#   docker build -f Dockerfile.gpu \
+#     --build-arg CUDA_TAG=12.3.2-cudnn9-runtime-ubuntu22.04 \
+#     --build-arg PADDLE_INDEX=https://www.paddlepaddle.org.cn/packages/stable/cu123/ \
+#     --build-arg TORCH_INDEX=https://download.pytorch.org/whl/cu121 -t ocr-worker:gpu .
+ARG CUDA_TAG=11.8.0-cudnn8-runtime-ubuntu22.04
+FROM nvidia/cuda:${CUDA_TAG}
+
+# CUDA-matched package sources (see note above before changing).
+ARG PADDLE_PKG=paddlepaddle-gpu==2.6.2
+ARG PADDLE_INDEX=https://www.paddlepaddle.org.cn/packages/stable/cu118/
+ARG TORCH_INDEX=https://download.pytorch.org/whl/cu118
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app \
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility
+
+# System deps: Python + the native libs OpenCV/Tesseract/PyMuPDF need.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 python3-pip python3-dev \
+    tesseract-ocr libglib2.0-0 libgl1 build-essential \
+    && ln -sf /usr/bin/python3 /usr/bin/python \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+RUN python -m pip install --no-cache-dir --upgrade pip
+
+# 1) GPU PyTorch first, from the CUDA-matched index (surya/doctr reuse it).
+RUN python -m pip install --no-cache-dir torch torchvision --index-url ${TORCH_INDEX}
+
+# 2) GPU PaddlePaddle, from the CUDA-matched Paddle index.
+RUN python -m pip install --no-cache-dir ${PADDLE_PKG} -i ${PADDLE_INDEX}
+
+# 3) Everything else from PyPI (CPU torch/paddle deliberately excluded).
+COPY requirements-gpu.txt .
+RUN python -m pip install --no-cache-dir -r requirements-gpu.txt
+
+COPY . .
+
+CMD ["python", "app/main.py"]
