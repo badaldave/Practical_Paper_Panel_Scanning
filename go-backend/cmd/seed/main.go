@@ -36,8 +36,8 @@ func main() {
 	tenantID := uuid.MustParse("e93fca1e-1f7c-47bc-87c2-127e7740e53a")
 	_, err = db.ExecContext(ctx, `
 		INSERT INTO tenants (id, name, domain, settings)
-		VALUES ($1, 'State University', 'test-uni.edu', '{}'::jsonb)
-		ON CONFLICT (id) DO NOTHING
+		VALUES ($1, 'Micronic Infotech Services Private Limited', 'micronicinfo.com', '{}'::jsonb)
+		ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, domain = EXCLUDED.domain
 	`, tenantID)
 	if err != nil {
 		log.Fatalf("Failed to seed tenant: %v", err)
@@ -53,8 +53,8 @@ func main() {
 	}
 	_, err = db.ExecContext(ctx, `
 		INSERT INTO users (id, tenant_id, email, password_hash, first_name, last_name, status)
-		VALUES ($1, $2, 'admin@test-uni.edu', $3, 'Alice', 'Smith', 'active')
-		ON CONFLICT (tenant_id, email) DO UPDATE SET password_hash = EXCLUDED.password_hash
+		VALUES ($1, $2, 'admin@micronicinfo.com', $3, 'Admin', 'User', 'active')
+		ON CONFLICT (id) DO UPDATE SET email = EXCLUDED.email, password_hash = EXCLUDED.password_hash, status = EXCLUDED.status
 	`, userID, tenantID, passHash)
 	if err != nil {
 		log.Fatalf("Failed to seed user: %v", err)
@@ -77,7 +77,7 @@ func main() {
 	pageID := uuid.MustParse("f512fb1e-355b-426b-a8ba-88cfce814ff2")
 	_, err = db.ExecContext(ctx, `
 		INSERT INTO document_pages (id, document_id, page_number, image_path, width, height, status)
-		VALUES ($1, $2, 1, 'test-uni.edu/demo_page.png', 800, 1100, 'processed')
+		VALUES ($1, $2, 1, 'micronicinfo.com/demo_page.png', 800, 1100, 'processed')
 		ON CONFLICT (document_id, page_number) DO NOTHING
 	`, pageID, docID)
 	if err != nil {

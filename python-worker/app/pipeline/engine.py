@@ -230,11 +230,20 @@ class ProcessingEngine:
                 row["cells"] = memory_layer.apply_corrections(doc_type, row["cells"])
 
         # Cross-row consensus: the same examiner recurs across rows keyed by mobile,
-        # so vote a single name/mobile per examiner and backfill poorly-read rows
-        # from their well-read siblings. Backfills are flagged (is_inferred).
-        from app.pipeline.consensus import apply_document_consensus
-        consensus_stats = apply_document_consensus(all_tables)
-        self.logger.info(f"Consensus pass: {consensus_stats}")
+        # so vote a single name/mobile per examiner and backfill poorly-read rows.
+        # The examiner directory widens this beyond the current sheet — poorly-read
+        # rows can also borrow from how the same examiner was read across every
+        # other document in the tenant. Backfills are flagged (is_inferred).
+        from app.pipeline.consensus import apply_document_consensus, build_examiner_directory
+        try:
+            examiner_pairs = WorkerRepository.load_examiner_pairs(tenant_id, exclude_document_id=document_id)
+            examiner_directory = build_examiner_directory(examiner_pairs)
+        except Exception as e:
+            self.logger.warning(f"Examiner directory unavailable, falling back to in-document consensus: {e}")
+            examiner_directory = None
+        consensus_stats = apply_document_consensus(all_tables, examiner_directory=examiner_directory)
+        known = len(examiner_directory["mob_to_names"]) if examiner_directory else 0
+        self.logger.info(f"Consensus pass: {consensus_stats} (examiner directory: {known} known mobiles)")
         WorkerRepository.update_document_progress(document_id, 95)
 
         # Commit structured tabular outputs to PostgreSQL

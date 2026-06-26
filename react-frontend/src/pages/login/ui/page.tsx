@@ -1,11 +1,12 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Shield, Lock, Mail, Globe, AlertCircle, Loader2 } from 'lucide-react';
+import { COMPANY_NAME, COMPANY_SHORT, PRODUCT_NAME } from '@/shared/config/brand';
 
 export const LoginPage: React.FC = () => {
   const navigate = useNavigate();
-  const [domain, setDomain] = useState('test-uni.edu');
-  const [email, setEmail] = useState('admin@test-uni.edu');
+  const [domain, setDomain] = useState('micronicinfo.com');
+  const [email, setEmail] = useState('admin@micronicinfo.com');
   const [password, setPassword] = useState('PasswordArgon2!12');
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -30,9 +31,9 @@ export const LoginPage: React.FC = () => {
       const data = await res.json();
       localStorage.setItem('auth_token', data.token);
       localStorage.setItem('auth_user', JSON.stringify(data.user));
-      
-      // Go to documents dashboard
-      navigate('/documents');
+
+      // Land on the best page for this user's permissions
+      navigate('/');
     } catch (err: any) {
       setError(err.message || 'Network error, please try again.');
     } finally {
@@ -41,8 +42,8 @@ export const LoginPage: React.FC = () => {
   };
 
   const handleSandboxAutofill = () => {
-    setDomain('test-uni.edu');
-    setEmail('admin@test-uni.edu');
+    setDomain('micronicinfo.com');
+    setEmail('admin@micronicinfo.com');
     setPassword('PasswordArgon2!12');
     setError(null);
   };
@@ -60,8 +61,9 @@ export const LoginPage: React.FC = () => {
           <div className="inline-flex p-3 bg-blue-500/10 border border-blue-500/20 rounded-xl mb-4 text-blue-400">
             <Shield className="w-7 h-7" />
           </div>
-          <h1 className="text-2xl font-bold tracking-tight text-white">Papyrus Portal</h1>
-          <p className="text-sm text-slate-400 mt-1">University OCR Result Processing Platform</p>
+          <h1 className="text-2xl font-bold tracking-tight text-white">{COMPANY_SHORT}</h1>
+          <p className="text-sm text-slate-400 mt-1">{PRODUCT_NAME}</p>
+          <p className="text-[11px] text-slate-600 mt-2">{COMPANY_NAME}</p>
         </div>
 
         {error && (
@@ -82,7 +84,7 @@ export const LoginPage: React.FC = () => {
                 required
                 value={domain}
                 onChange={(e) => setDomain(e.target.value)}
-                placeholder="e.g. test-uni.edu"
+                placeholder="e.g. micronicinfo.com"
                 className="w-full pl-10 pr-4 py-2.5 bg-slate-950/60 border border-slate-800 focus:border-blue-500/80 focus:ring-1 focus:ring-blue-500/30 rounded-xl text-sm text-white placeholder-slate-600 outline-none transition"
               />
             </div>
@@ -98,7 +100,7 @@ export const LoginPage: React.FC = () => {
                 required
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
-                placeholder="admin@test-uni.edu"
+                placeholder="admin@micronicinfo.com"
                 className="w-full pl-10 pr-4 py-2.5 bg-slate-950/60 border border-slate-800 focus:border-blue-500/80 focus:ring-1 focus:ring-blue-500/30 rounded-xl text-sm text-white placeholder-slate-600 outline-none transition"
               />
             </div>

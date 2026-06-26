@@ -1,14 +1,16 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { AgGridReact } from 'ag-grid-react';
 import { ColDef, GridApi, GridReadyEvent, CellClickedEvent } from 'ag-grid-community';
-import { AlertCircle, Download, CheckCircle, ArrowLeft, Loader2 } from 'lucide-react';
+import { AlertCircle, Download, CheckCircle, ArrowLeft, Loader2, Lock, Unlock, Check } from 'lucide-react';
 
 import 'ag-grid-community/styles/ag-grid.css';
 import 'ag-grid-community/styles/ag-theme-quartz.css';
 
 import { apiClient } from '@/shared/api/client';
 import { CanvasViewer, CanvasCell } from '@/shared/ui/canvas-viewer';
+import { verificationApi, settingsApi, type DocumentState } from '@/shared/api/services';
+import { useAuthStore } from '@/entities/user/model/store';
 
 interface CellRecord {
   id: string;
@@ -69,6 +71,101 @@ export const VerificationPage: React.FC = () => {
   });
   const [isSavingMetadata, setIsSavingMetadata] = useState<boolean>(false);
   const gridApiRef = useRef<GridApi | null>(null);
+
+  // --- Verification lock & per-page progress ---
+  const myUserId = useAuthStore((s) => s.user?.id);
+  const canVerify = useAuthStore((s) => s.hasPermission('verification.perform'));
+  const [vState, setVState] = useState<DocumentState | null>(null);
+  const [vBusy, setVBusy] = useState(false);
+
+  // Tenant-wide verification preferences (drive grid highlighting).
+  const [lowConfThreshold, setLowConfThreshold] = useState(0.85);
+  const [flagInferred, setFlagInferred] = useState(true);
+  useEffect(() => {
+    settingsApi
+      .get()
+      .then((s) => {
+        setLowConfThreshold(s.settings.low_confidence_threshold ?? 0.85);
+        setFlagInferred(s.settings.flag_inferred_values ?? true);
+      })
+      .catch(() => {});
+  }, []);
+
+  const lockedByMe = !!vState && vState.locked_by === myUserId;
+  const isSubmitted = vState?.verification_status === 'submitted';
+  const editable = lockedByMe && !isSubmitted && canVerify;
+
+  const refreshVState = useCallback(async () => {
+    if (!id) return;
+    try {
+      setVState(await verificationApi.state(id));
+    } catch {
+      /* ignore */
+    }
+  }, [id]);
+
+  const claimDoc = async () => {
+    if (!id) return;
+    setVBusy(true);
+    try {
+      setVState(await verificationApi.claim(id));
+    } catch (e: any) {
+      alert(e.message || 'This file is already locked by another verifier.');
+      await refreshVState();
+    } finally {
+      setVBusy(false);
+    }
+  };
+
+  const releaseDoc = async () => {
+    if (!id) return;
+    if (!confirm('Release this file back to the pool? Your saved corrections are kept, but page-review progress resets for whoever takes it next.')) return;
+    setVBusy(true);
+    try {
+      await verificationApi.release(id);
+      navigate('/queue');
+    } catch (e: any) {
+      alert(e.message);
+    } finally {
+      setVBusy(false);
+    }
+  };
+
+  const verifiedPageSet = useMemo(() => {
+    const s = new Set<number>();
+    vState?.pages?.forEach((p) => p.is_verified && s.add(p.page_number));
+    return s;
+  }, [vState]);
+
+  const currentPageVerified = verifiedPageSet.has(currentPage);
+
+  const toggleCurrentPage = async () => {
+    if (!id || !editable) return;
+    setVBusy(true);
+    try {
+      await verificationApi.markPage(id, currentPage, !currentPageVerified);
+      await refreshVState();
+    } catch (e: any) {
+      alert(e.message);
+    } finally {
+      setVBusy(false);
+    }
+  };
+
+  const submitDoc = async () => {
+    if (!id) return;
+    setVBusy(true);
+    try {
+      await verificationApi.submit(id);
+      alert('Document submitted — verification complete.');
+      navigate('/queue');
+    } catch (e: any) {
+      alert(e.message || 'Could not submit. Ensure every page is marked verified.');
+      await refreshVState();
+    } finally {
+      setVBusy(false);
+    }
+  };
 
   // Sync page metadata state when currentPage or docDetails changes
   useEffect(() => {
@@ -132,6 +229,17 @@ export const VerificationPage: React.FC = () => {
     return () => clearInterval(interval);
   }, [id, docDetails]);
 
+  // Load verification lock/progress state on open.
+  useEffect(() => {
+    refreshVState();
+  }, [refreshVState]);
+
+  // Broadcast live presence (which page I'm on) while I hold the lock.
+  useEffect(() => {
+    if (!id || !lockedByMe || isSubmitted) return;
+    verificationApi.presence(id, currentPage).catch(() => {});
+  }, [id, currentPage, lockedByMe, isSubmitted]);
+
   // Pivot flat cell list into 2D row structures for AG Grid
   const gridData = useMemo(() => {
     const pageCells = cells.filter(c => c.page_number === currentPage);
@@ -191,7 +299,7 @@ export const VerificationPage: React.FC = () => {
       cols.push({
         headerName: colName,
         field: `col_${c}`,
-        editable: true,
+        editable: editable,
         // Custom value getter/setter to read cell nested details
         valueGetter: (params) => {
           if (!params.data) return '';
@@ -213,14 +321,14 @@ export const VerificationPage: React.FC = () => {
 
           // Inferred (auto-filled from a matching mobile) takes precedence: flag it
           // distinctly so a reviewer knows the value was voted, not read.
-          if (cellObj.is_inferred) {
+          if (cellObj.is_inferred && flagInferred) {
             return { backgroundColor: 'rgba(139, 92, 246, 0.14)', borderLeft: '3px solid #8b5cf6' }; // purple = inferred
           }
 
           const conf = cellObj.confidence;
-          if (conf < 0.85) {
+          if (conf < lowConfThreshold) {
             return { backgroundColor: 'rgba(239, 68, 68, 0.15)', borderLeft: '3px solid #ef4444' }; // soft red for low conf
-          } else if (conf < 0.95) {
+          } else if (conf < Math.min(1, lowConfThreshold + 0.1)) {
             return { backgroundColor: 'rgba(245, 158, 11, 0.12)', borderLeft: '3px solid #f59e0b' }; // soft yellow
           }
           return { backgroundColor: 'rgba(16, 185, 129, 0.05)', borderLeft: 'none' }; // soft green
@@ -238,7 +346,7 @@ export const VerificationPage: React.FC = () => {
       });
     }
     return cols;
-  }, [cells, currentPage]);
+  }, [cells, currentPage, editable, lowConfThreshold, flagInferred]);
 
   // Keep grid references
   const onGridReady = (params: GridReadyEvent) => {
@@ -394,10 +502,10 @@ export const VerificationPage: React.FC = () => {
     }));
   }, [cells, currentPage]);
 
-  // Count low-confidence cells
+  // Count low-confidence cells (below the tenant-configured threshold)
   const lowConfidenceCount = useMemo(() => {
-    return cells.filter(c => c.confidence < 0.85).length;
-  }, [cells]);
+    return cells.filter(c => c.confidence < lowConfThreshold).length;
+  }, [cells, lowConfThreshold]);
 
   if (loading) {
     return (
@@ -514,34 +622,79 @@ export const VerificationPage: React.FC = () => {
           </button>
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2">
           <button
             onClick={() => handleDownload('csv')}
             className="flex items-center gap-2 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 rounded-lg text-xs font-semibold text-slate-300 hover:text-white transition cursor-pointer"
           >
-            <Download className="w-3.5 h-3.5" /> Export CSV
+            <Download className="w-3.5 h-3.5" /> CSV
           </button>
           <button
             onClick={() => handleDownload('excel')}
             className="flex items-center gap-2 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 rounded-lg text-xs font-semibold text-slate-300 hover:text-white transition cursor-pointer"
           >
-            <Download className="w-3.5 h-3.5" /> Export Excel
+            <Download className="w-3.5 h-3.5" /> Excel
           </button>
-          <button
-            onClick={() => navigate('/documents')}
-            className="flex items-center gap-2 px-4 py-1.5 bg-emerald-600 hover:bg-emerald-500 rounded-lg text-xs font-semibold text-white transition shadow-lg shadow-emerald-600/20 cursor-pointer"
-          >
-            <CheckCircle className="w-3.5 h-3.5" /> Submit Batch
-          </button>
+
+          {/* Verification lock controls */}
+          {isSubmitted ? (
+            <span className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-950 border border-emerald-900 rounded-lg text-xs font-semibold text-emerald-400">
+              <CheckCircle className="w-3.5 h-3.5" /> Submitted
+            </span>
+          ) : lockedByMe ? (
+            <>
+              <span className="px-2.5 py-1.5 bg-slate-950 border border-slate-800 rounded-lg text-xs font-semibold text-slate-300">
+                {verifiedPageSet.size}/{vState?.total_pages || totalPages} pages
+              </span>
+              <button
+                onClick={releaseDoc}
+                disabled={vBusy}
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 rounded-lg text-xs font-semibold text-slate-300 hover:text-white transition cursor-pointer disabled:opacity-50"
+              >
+                <Unlock className="w-3.5 h-3.5" /> Release
+              </button>
+              <button
+                onClick={submitDoc}
+                disabled={vBusy || !((vState?.total_pages || 0) > 0 && verifiedPageSet.size >= (vState?.total_pages || totalPages))}
+                title={verifiedPageSet.size < (vState?.total_pages || totalPages) ? 'Mark every page verified before submitting' : 'Submit verified document'}
+                className="flex items-center gap-2 px-4 py-1.5 bg-emerald-600 hover:bg-emerald-500 disabled:bg-emerald-900 disabled:text-emerald-600/60 rounded-lg text-xs font-semibold text-white transition shadow-lg shadow-emerald-600/20 cursor-pointer disabled:cursor-not-allowed disabled:shadow-none"
+              >
+                <CheckCircle className="w-3.5 h-3.5" /> Submit
+              </button>
+            </>
+          ) : vState?.locked_by ? (
+            <span className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-950 border border-amber-900 rounded-lg text-xs font-semibold text-amber-400">
+              <Lock className="w-3.5 h-3.5" /> Locked by {vState.locked_by_name || 'another user'}
+            </span>
+          ) : canVerify ? (
+            <button
+              onClick={claimDoc}
+              disabled={vBusy}
+              className="flex items-center gap-2 px-4 py-1.5 bg-blue-600 hover:bg-blue-500 rounded-lg text-xs font-semibold text-white transition shadow-lg shadow-blue-600/20 cursor-pointer disabled:opacity-50"
+            >
+              <Lock className="w-3.5 h-3.5" /> Claim to verify
+            </button>
+          ) : null}
         </div>
       </header>
+
+      {/* Lock state banner */}
+      {!isSubmitted && !lockedByMe && (
+        <div className="bg-slate-900/80 border-b border-slate-800 px-6 py-2 text-xs text-slate-400 shrink-0">
+          {vState?.locked_by
+            ? `This file is being verified by ${vState.locked_by_name || 'another user'}. You are viewing it read-only.`
+            : canVerify
+              ? 'Read-only preview. Claim the file to lock it to you and start verifying.'
+              : 'You have read-only access to this document.'}
+        </div>
+      )}
 
       {/* Warnings & Notices */}
       {lowConfidenceCount > 0 && (
         <div className="bg-amber-950/80 border-b border-amber-900/60 px-6 py-2.5 flex items-center gap-2 text-amber-300 text-xs shrink-0">
           <AlertCircle className="w-4 h-4 text-amber-400 shrink-0" />
           <span>
-            Warning: <strong>{lowConfidenceCount} cells</strong> contain low confidence extractions (&lt; 85%). Please review highlighted grid entries before submitting.
+            Warning: <strong>{lowConfidenceCount} cells</strong> contain low confidence extractions (&lt; {Math.round(lowConfThreshold * 100)}%). Please review highlighted grid entries before submitting.
           </span>
         </div>
       )}
@@ -628,8 +781,8 @@ export const VerificationPage: React.FC = () => {
             <div className="flex justify-end">
               <button
                 onClick={handleSaveMetadata}
-                disabled={isSavingMetadata}
-                className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-500 disabled:bg-blue-800 text-white text-xs font-semibold rounded transition cursor-pointer"
+                disabled={isSavingMetadata || !editable}
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-500 disabled:bg-blue-800 disabled:opacity-50 text-white text-xs font-semibold rounded transition cursor-pointer disabled:cursor-not-allowed"
               >
                 {isSavingMetadata ? (
                   <>
@@ -644,17 +797,31 @@ export const VerificationPage: React.FC = () => {
 
           <div className="px-4 py-3 border-b border-slate-800 bg-slate-900/60 flex items-center justify-between">
             <div className="flex items-center gap-3">
-              <span className="text-xs font-semibold text-slate-300">Tabular Editor (AG Grid CE)</span>
-              <button
-                onClick={handleAddRow}
-                className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 hover:text-white text-slate-300 text-[10px] font-bold rounded transition border border-slate-700 cursor-pointer"
-              >
-                + Add Row
-              </button>
+              <span className="text-xs font-semibold text-slate-300">Tabular Editor</span>
+              {editable && (
+                <button
+                  onClick={handleAddRow}
+                  className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 hover:text-white text-slate-300 text-[10px] font-bold rounded transition border border-slate-700 cursor-pointer"
+                >
+                  + Add Row
+                </button>
+              )}
+              {isSaving && <span className="text-[10px] text-blue-400 animate-pulse font-semibold">Autosaving…</span>}
             </div>
-            {isSaving && (
-              <span className="text-[10px] text-blue-400 animate-pulse font-semibold">Autosaving changes...</span>
-            )}
+            {/* Per-page verification toggle (gates Submit) */}
+            <button
+              onClick={toggleCurrentPage}
+              disabled={!editable || vBusy}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition cursor-pointer disabled:cursor-not-allowed ${
+                currentPageVerified
+                  ? 'bg-emerald-950 border border-emerald-900 text-emerald-400'
+                  : 'bg-slate-800 border border-slate-700 text-slate-300 hover:text-white disabled:opacity-50'
+              }`}
+              title={editable ? 'Toggle this page as verified' : 'Claim the file to mark pages verified'}
+            >
+              <Check className="w-3.5 h-3.5" />
+              {currentPageVerified ? `Page ${currentPage} verified` : `Mark page ${currentPage} verified`}
+            </button>
           </div>
           
           <div className="flex-1 w-full ag-theme-quartz-dark">

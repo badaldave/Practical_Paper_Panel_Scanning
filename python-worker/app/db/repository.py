@@ -256,6 +256,48 @@ class WorkerRepository:
                 conn.commit()
 
     @staticmethod
+    def load_examiner_pairs(tenant_id: str, exclude_document_id: str = None) -> list:
+        """Cross-document examiner directory source.
+
+        Returns every (name, mobile) pair already stored for this TENANT across
+        all of its documents, so the consensus pass can infer a poorly-read
+        name/mobile from how the same examiner was read on other sheets — not
+        just from sibling rows in the current document.
+
+        Only the latest version of each cell is used (so human corrections win),
+        and the current document is excluded to avoid voting against stale copies
+        of its own cells on reprocessing. Name column = 2, mobile column = 3."""
+        params = [tenant_id]
+        exclude_clause = ""
+        if exclude_document_id:
+            exclude_clause = "AND c.document_id <> %s"
+            params.append(exclude_document_id)
+
+        query = f"""
+            WITH latest AS (
+                SELECT DISTINCT ON (c.document_id, c.page_number, c.row_index, c.column_index)
+                    c.document_id, c.page_number, c.row_index, c.column_index,
+                    c.current_value, c.is_inferred
+                FROM extracted_cells c
+                JOIN documents d ON d.id = c.document_id
+                WHERE d.tenant_id = %s
+                  AND c.column_index IN (2, 3)
+                  {exclude_clause}
+                ORDER BY c.document_id, c.page_number, c.row_index, c.column_index, c.version DESC
+            )
+            SELECT n.current_value AS name,
+                   n.is_inferred AS name_inferred,
+                   m.current_value AS mobile
+            FROM latest n
+            JOIN latest m
+              ON n.document_id = m.document_id
+             AND n.page_number = m.page_number
+             AND n.row_index = m.row_index
+            WHERE n.column_index = 2 AND m.column_index = 3
+        """
+        return DBConnection.execute_query(query, tuple(params), fetch=True) or []
+
+    @staticmethod
     def load_correction_memory(tenant_id: str) -> dict:
         """Loads non-applied corrections to build a local correction dictionary."""
         query = """

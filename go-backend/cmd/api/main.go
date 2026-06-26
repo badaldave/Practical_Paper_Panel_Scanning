@@ -13,6 +13,11 @@ import (
 	"university-result-processing/backend/internal/application/auth"
 	"university-result-processing/backend/internal/application/document"
 	"university-result-processing/backend/internal/application/extraction"
+	"university-result-processing/backend/internal/application/role"
+	"university-result-processing/backend/internal/application/settings"
+	"university-result-processing/backend/internal/application/stats"
+	"university-result-processing/backend/internal/application/user"
+	"university-result-processing/backend/internal/application/verification"
 	"university-result-processing/backend/internal/domain"
 	"university-result-processing/backend/internal/infrastructure/db"
 	"university-result-processing/backend/internal/infrastructure/storage"
@@ -66,21 +71,34 @@ func main() {
 	tmplRepo := db.NewTemplateRepository(database)
 	auditRepo := db.NewAuditRepository(database)
 	queueRepo := db.NewQueueRepository(database)
+	roleRepo := db.NewRoleRepository(database)
+	verifRepo := db.NewVerificationRepository(database)
+	statsRepo := db.NewStatsRepository(database)
 
-	// Seed basic roles and permissions if needed
+	// Seed permission catalog, shared system roles, and their grants if needed
 	seedRolesAndPermissions(database)
 
 	// 5. Initialize Services
 	authService := auth.NewAuthService(tenantRepo, userRepo, jwtSecret)
 	docService := document.NewDocumentService(docRepo, queueRepo, store)
 	extService := extraction.NewExtractionService(extRepo, docRepo, auditRepo)
+	userService := user.NewUserService(userRepo)
+	roleService := role.NewRoleService(roleRepo)
+	verifService := verification.NewVerificationService(verifRepo)
+	statsService := stats.NewStatsService(statsRepo)
+	settingsService := settings.NewSettingsService(tenantRepo)
 
 	// 6. Initialize Handlers
 	authHandler := handlers.NewAuthHandler(authService)
 	docHandler := handlers.NewDocumentHandler(docService)
 	extHandler := handlers.NewExtractionHandler(extService)
 	tmplHandler := handlers.NewTemplateHandler(tmplRepo)
-	exportHandler := handlers.NewExportHandler(docRepo, extRepo, auditRepo)
+	exportHandler := handlers.NewExportHandler(docRepo, extRepo, auditRepo, settingsService)
+	userHandler := handlers.NewUserHandler(userService)
+	roleHandler := handlers.NewRoleHandler(roleService)
+	verifHandler := handlers.NewVerificationHandler(verifService)
+	statsHandler := handlers.NewStatsHandler(statsService)
+	settingsHandler := handlers.NewSettingsHandler(settingsService)
 
 	// 7. Start local background mock processor for graceful standalone execution
 	mockWorker := os.Getenv("MOCK_WORKER")
@@ -95,16 +113,21 @@ func main() {
 
 	// 8. Setup Router
 	router := httpRouter.SetupRouter(httpRouter.RouterConfig{
-		AuthHandler:       authHandler,
-		DocumentHandler:   docHandler,
-		ExtractionHandler: extHandler,
-		TemplateHandler:   tmplHandler,
-		ExportHandler:     exportHandler,
-		JWTSecret:         jwtSecret,
-		UserRepository:    userRepo,
-		RateLimitRate:     5.0, // 5 requests per second
-		RateLimitCap:      20.0, // Burst capacity of 20
-		UploadDir:         uploadDir,
+		AuthHandler:         authHandler,
+		DocumentHandler:     docHandler,
+		ExtractionHandler:   extHandler,
+		TemplateHandler:     tmplHandler,
+		ExportHandler:       exportHandler,
+		UserHandler:         userHandler,
+		RoleHandler:         roleHandler,
+		VerificationHandler: verifHandler,
+		StatsHandler:        statsHandler,
+		SettingsHandler:     settingsHandler,
+		JWTSecret:           jwtSecret,
+		UserRepository:      userRepo,
+		RateLimitRate:       5.0,  // 5 requests per second
+		RateLimitCap:        20.0, // Burst capacity of 20
+		UploadDir:           uploadDir,
 	})
 
 	srv := &http.Server{
@@ -138,25 +161,84 @@ func main() {
 	log.Println("Server exited cleanly")
 }
 
+// allPermissions is the platform's permission catalog. Codes are
+// "<category>.<action>"; the frontend groups by category.
+var allPermissions = []struct{ Code, Desc string }{
+	{"documents.view", "View documents and extracted data"},
+	{"documents.upload", "Upload new documents for processing"},
+	{"documents.delete", "Delete documents"},
+	{"documents.export", "Export extracted data (CSV/Excel)"},
+	{"verification.perform", "Claim files and verify/correct cell data"},
+	{"verification.assign", "Assign files to verifiers and force-release locks"},
+	{"users.view", "View users"},
+	{"users.manage", "Create, edit, delete users and reset passwords"},
+	{"roles.view", "View roles and permissions"},
+	{"roles.manage", "Create, edit, and delete roles"},
+	{"analytics.view", "View analytics, statistics, and live activity"},
+	{"templates.view", "View document templates"},
+	{"templates.manage", "Create and edit document templates"},
+	{"settings.manage", "Manage tenant settings"},
+}
+
+// allPermissionCodes returns every catalog code (used to grant System Admin all).
+func allPermissionCodes() []string {
+	codes := make([]string, len(allPermissions))
+	for i, p := range allPermissions {
+		codes[i] = p.Code
+	}
+	return codes
+}
+
+// systemRoles are the shared, non-editable roles available to every tenant,
+// each with its default permission grant set.
+var systemRoles = []struct {
+	Name, Description string
+	Permissions       []string
+}{
+	{"System Admin", "Full access to every feature, user, and setting", allPermissionCodes()},
+	{"Controller of Examinations", "Oversees verification, assigns work, views analytics",
+		[]string{"documents.view", "documents.export", "verification.perform", "verification.assign", "analytics.view", "users.view"}},
+	{"Registrar", "Reviews statistics, users, and audit records",
+		[]string{"documents.view", "analytics.view", "users.view", "roles.view"}},
+	{"Evaluator", "Verifies and corrects extracted data from the pool",
+		[]string{"documents.view", "verification.perform"}},
+	{"Viewer", "Read-only access to documents", []string{"documents.view"}},
+}
+
 func seedRolesAndPermissions(database *db.DB) {
-	// Seed basic default roles
-	roles := []struct {
-		Name        string
-		Description string
-	}{
-		{"System Admin", "Manage tenants, configuration, and overall settings"},
-		{"Controller of Examinations", "Oversee and verify result lists"},
-		{"Registrar", "Access statistics and audit records"},
-		{"Evaluator", "Review extractions and correct values"},
-		{"Viewer", "Read-only access to records"},
+	// 1. Permission catalog (code is uniquely constrained).
+	for _, p := range allPermissions {
+		if _, err := database.Exec(`
+			INSERT INTO permissions (id, code, description)
+			VALUES (uuid_generate_v4(), $1, $2)
+			ON CONFLICT (code) DO UPDATE SET description = EXCLUDED.description
+		`, p.Code, p.Desc); err != nil {
+			log.Printf("seed permission %s failed: %v", p.Code, err)
+		}
 	}
 
-	for _, r := range roles {
-		_, _ = database.Exec(`
-			INSERT INTO roles (id, name, description) 
-			VALUES (uuid_generate_v4(), $1, $2)
-			ON CONFLICT (name) DO NOTHING
-		`, r.Name, r.Description)
+	// 2. Shared system roles (tenant_id IS NULL, is_system = TRUE). We can't use
+	//    ON CONFLICT against the expression-based uniqueness index, so insert-if-
+	//    absent then normalize.
+	for _, r := range systemRoles {
+		if _, err := database.Exec(`
+			INSERT INTO roles (id, tenant_id, name, description, is_system)
+			SELECT uuid_generate_v4(), NULL, $1, $2, TRUE
+			WHERE NOT EXISTS (SELECT 1 FROM roles WHERE tenant_id IS NULL AND name = $1)
+		`, r.Name, r.Description); err != nil {
+			log.Printf("seed role %s failed: %v", r.Name, err)
+		}
+		_, _ = database.Exec(`UPDATE roles SET is_system = TRUE, description = $2 WHERE tenant_id IS NULL AND name = $1`, r.Name, r.Description)
+
+		// 3. Grant the role's permissions (idempotent).
+		if _, err := database.Exec(`
+			INSERT INTO role_permissions (role_id, permission_id)
+			SELECT r.id, p.id FROM roles r, permissions p
+			WHERE r.tenant_id IS NULL AND r.name = $1 AND p.code = ANY($2)
+			ON CONFLICT DO NOTHING
+		`, r.Name, r.Permissions); err != nil {
+			log.Printf("grant permissions for role %s failed: %v", r.Name, err)
+		}
 	}
 }
 
@@ -202,7 +284,7 @@ func startMockJobProcessor(ctx context.Context, queueRepo domain.QueueRepository
 				ID:         pageID,
 				DocumentID: job.DocumentID,
 				PageNumber: 1,
-				ImagePath:  "test-uni.edu/demo_page.png",
+				ImagePath:  "micronicinfo.com/demo_page.png",
 				Width:      800,
 				Height:     1100,
 				Status:     "processed",

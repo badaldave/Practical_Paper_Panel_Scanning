@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/csv"
 	"fmt"
 	"net/http"
@@ -9,21 +10,40 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"university-result-processing/backend/internal/application/settings"
 	"university-result-processing/backend/internal/domain"
 )
 
 type ExportHandler struct {
-	docRepo   domain.DocumentRepository
-	extRepo   domain.ExtractionRepository
-	auditRepo domain.AuditRepository
+	docRepo     domain.DocumentRepository
+	extRepo     domain.ExtractionRepository
+	auditRepo   domain.AuditRepository
+	settingsSvc *settings.SettingsService
 }
 
-func NewExportHandler(dr domain.DocumentRepository, er domain.ExtractionRepository, ar domain.AuditRepository) *ExportHandler {
+func NewExportHandler(dr domain.DocumentRepository, er domain.ExtractionRepository, ar domain.AuditRepository, ss *settings.SettingsService) *ExportHandler {
 	return &ExportHandler{
-		docRepo:   dr,
-		extRepo:   er,
-		auditRepo: ar,
+		docRepo:     dr,
+		extRepo:     er,
+		auditRepo:   ar,
+		settingsSvc: ss,
 	}
+}
+
+// includeConfidence honors the tenant's export_include_confidence setting,
+// defaulting to true if settings can't be read.
+func (h *ExportHandler) includeConfidence(ctx context.Context) bool {
+	if h.settingsSvc == nil {
+		return true
+	}
+	s, err := h.settingsSvc.Get(ctx)
+	if err != nil {
+		return true
+	}
+	if v, ok := s.Settings["export_include_confidence"].(bool); ok {
+		return v
+	}
+	return true
 }
 
 func (h *ExportHandler) ExportCSV(c *gin.Context) {
@@ -101,18 +121,21 @@ func (h *ExportHandler) ExportCSV(c *gin.Context) {
 		}
 		header = append(header, colName)
 	}
-	for col := 0; col <= maxCol; col++ {
-		colName := fmt.Sprintf("Col_%d", col)
-		if col == 0 {
-			colName = "Subject Code"
-		} else if col == 1 {
-			colName = "Batch"
-		} else if col == 2 {
-			colName = "Examiner Name"
-		} else if col == 3 {
-			colName = "Mobile Number"
+	includeConf := h.includeConfidence(c.Request.Context())
+	if includeConf {
+		for col := 0; col <= maxCol; col++ {
+			colName := fmt.Sprintf("Col_%d", col)
+			if col == 0 {
+				colName = "Subject Code"
+			} else if col == 1 {
+				colName = "Batch"
+			} else if col == 2 {
+				colName = "Examiner Name"
+			} else if col == 3 {
+				colName = "Mobile Number"
+			}
+			header = append(header, colName+"_Confidence")
 		}
-		header = append(header, colName+"_Confidence")
 	}
 	_ = writer.Write(header)
 
@@ -130,12 +153,14 @@ func (h *ExportHandler) ExportCSV(c *gin.Context) {
 			csvRow = append(csvRow, val)
 		}
 		// Confidences
-		for col := 0; col <= maxCol; col++ {
-			conf := ""
-			if cell, exists := cols[col]; exists {
-				conf = fmt.Sprintf("%.2f%%", cell.Confidence*100)
+		if includeConf {
+			for col := 0; col <= maxCol; col++ {
+				conf := ""
+				if cell, exists := cols[col]; exists {
+					conf = fmt.Sprintf("%.2f%%", cell.Confidence*100)
+				}
+				csvRow = append(csvRow, conf)
 			}
-			csvRow = append(csvRow, conf)
 		}
 		_ = writer.Write(csvRow)
 	}
@@ -241,18 +266,21 @@ func (h *ExportHandler) ExportExcel(c *gin.Context) {
 		}
 		header = append(header, colName)
 	}
-	for col := 0; col <= maxCol; col++ {
-		colName := fmt.Sprintf("Col_%d", col)
-		if col == 0 {
-			colName = "Subject Code"
-		} else if col == 1 {
-			colName = "Batch"
-		} else if col == 2 {
-			colName = "Examiner Name"
-		} else if col == 3 {
-			colName = "Mobile Number"
+	includeConf := h.includeConfidence(c.Request.Context())
+	if includeConf {
+		for col := 0; col <= maxCol; col++ {
+			colName := fmt.Sprintf("Col_%d", col)
+			if col == 0 {
+				colName = "Subject Code"
+			} else if col == 1 {
+				colName = "Batch"
+			} else if col == 2 {
+				colName = "Examiner Name"
+			} else if col == 3 {
+				colName = "Mobile Number"
+			}
+			header = append(header, colName+"_Confidence")
 		}
-		header = append(header, colName+"_Confidence")
 	}
 	_ = writer.Write(header)
 
@@ -269,12 +297,14 @@ func (h *ExportHandler) ExportExcel(c *gin.Context) {
 			csvRow = append(csvRow, val)
 		}
 		// Confidences
-		for col := 0; col <= maxCol; col++ {
-			conf := ""
-			if cell, exists := cols[col]; exists {
-				conf = strconv.FormatFloat(cell.Confidence, 'f', 4, 64)
+		if includeConf {
+			for col := 0; col <= maxCol; col++ {
+				conf := ""
+				if cell, exists := cols[col]; exists {
+					conf = strconv.FormatFloat(cell.Confidence, 'f', 4, 64)
+				}
+				csvRow = append(csvRow, conf)
 			}
-			csvRow = append(csvRow, conf)
 		}
 		_ = writer.Write(csvRow)
 	}
