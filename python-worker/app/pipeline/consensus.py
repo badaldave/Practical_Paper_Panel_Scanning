@@ -126,8 +126,12 @@ def build_examiner_directory(pairs):
         mob = _nmob(p.get("mobile"))
         if len(mob) != 10 or _name_letters(name) < 2:
             continue
-        mob_to_names[mob][name] += 1
-        name_to_mobs[_nname(name)][mob] += 1
+        # Seeded registry rows carry `votes` (times_seen) so a heavily-attested
+        # examiner outweighs a one-off read; document pairs default to a single
+        # vote. The apply step still caps any one examiner at DB_VOTE_CAP.
+        weight = p.get("votes") or 1
+        mob_to_names[mob][name] += weight
+        name_to_mobs[_nname(name)][mob] += weight
     return {"mob_to_names": mob_to_names, "name_to_mobs": name_to_mobs}
 
 

@@ -237,7 +237,11 @@ class ProcessingEngine:
         from app.pipeline.consensus import apply_document_consensus, build_examiner_directory
         try:
             examiner_pairs = WorkerRepository.load_examiner_pairs(tenant_id, exclude_document_id=document_id)
-            examiner_directory = build_examiner_directory(examiner_pairs)
+            # Seeded historical prior (EXMNAME-style imports) joins the same
+            # directory as live cross-document reads — registry rows are weighted
+            # by times_seen and ambiguous mobiles are pre-filtered by the query.
+            registry_pairs = WorkerRepository.load_registry_pairs(tenant_id)
+            examiner_directory = build_examiner_directory(examiner_pairs + registry_pairs)
         except Exception as e:
             self.logger.warning(f"Examiner directory unavailable, falling back to in-document consensus: {e}")
             examiner_directory = None

@@ -298,6 +298,28 @@ class WorkerRepository:
         return DBConnection.execute_query(query, tuple(params), fetch=True) or []
 
     @staticmethod
+    def load_registry_pairs(tenant_id: str) -> list:
+        """Historical examiner prior, shaped like `load_examiner_pairs` output.
+
+        Returns the seeded (mobile -> canonical name) directory imported from
+        spreadsheets into `examiner_registry`, so the consensus pass treats it as
+        just another set of cross-document votes — a poorly-read or missing name
+        on a new sheet borrows from history when its mobile is recognised.
+
+        Ambiguous mobiles (a number reused by different people across years) are
+        excluded: we never auto-fill a name we aren't confident about. `votes`
+        carries `times_seen` so a heavily-attested examiner weighs more (the apply
+        step still caps any single examiner's influence at DB_VOTE_CAP)."""
+        query = """
+            SELECT mobile, canonical_name AS name, times_seen AS votes
+            FROM examiner_registry
+            WHERE tenant_id = %s
+              AND is_ambiguous = FALSE
+              AND canonical_name IS NOT NULL
+        """
+        return DBConnection.execute_query(query, (tenant_id,), fetch=True) or []
+
+    @staticmethod
     def load_correction_memory(tenant_id: str) -> dict:
         """Loads non-applied corrections to build a local correction dictionary."""
         query = """
