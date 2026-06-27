@@ -12,6 +12,7 @@ interface DocumentRecord {
   mime_type: string;
   status: string; // 'uploaded', 'queued', 'processing', 'extracted', 'failed', 'verified'
   progress_percentage: number;
+  page_count?: number;
   error_message?: string;
   created_at: string;
 }
@@ -242,6 +243,7 @@ export const DashboardPage: React.FC = () => {
               <thead className="bg-slate-950/80 text-[10px] uppercase tracking-wider text-slate-400">
                 <tr>
                   <th className="px-4 py-2.5">Document</th>
+                  <th className="px-4 py-2.5">Pages</th>
                   <th className="px-4 py-2.5">Size</th>
                   <th className="px-4 py-2.5">Status</th>
                   <th className="px-4 py-2.5 text-right">Actions</th>
@@ -250,13 +252,13 @@ export const DashboardPage: React.FC = () => {
               <tbody>
                 {loading ? (
                   <tr>
-                    <td colSpan={4} className="py-10 text-center text-slate-500">
+                    <td colSpan={5} className="py-10 text-center text-slate-500">
                       <Loader2 className="mx-auto mb-2 h-5 w-5 animate-spin text-blue-500" /> Loading…
                     </td>
                   </tr>
                 ) : filteredDocs.length === 0 ? (
                   <tr>
-                    <td colSpan={4} className="py-10 text-center text-slate-500">
+                    <td colSpan={5} className="py-10 text-center text-slate-500">
                       No documents found.
                     </td>
                   </tr>
@@ -269,8 +271,16 @@ export const DashboardPage: React.FC = () => {
                         </p>
                         <p className="mt-0.5 text-[10px] text-slate-500">{new Date(doc.created_at).toLocaleString()}</p>
                       </td>
+                      <td className="px-4 py-3 font-mono text-[11px] text-slate-400">
+                        {doc.page_count != null ? `${doc.page_count} ${doc.page_count === 1 ? 'page' : 'pages'}` : '—'}
+                      </td>
                       <td className="px-4 py-3 font-mono text-[11px] text-slate-400">{formatBytes(doc.file_size)}</td>
-                      <td className="px-4 py-3">{statusBadge(doc)}</td>
+                      <td className="px-4 py-3">
+                        {statusBadge(doc)}
+                        {doc.status === 'failed' && doc.error_message && (
+                          <p className="mt-1.5 max-w-[260px] text-[10px] leading-snug text-red-400/90">{doc.error_message}</p>
+                        )}
+                      </td>
                       <td className="px-4 py-3">
                         <div className="flex items-center justify-end gap-2">
                           {['extracted', 'verified'].includes(doc.status) && (

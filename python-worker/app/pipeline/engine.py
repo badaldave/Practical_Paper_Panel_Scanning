@@ -98,7 +98,10 @@ class ProcessingEngine:
             doc_pdf = fitz.open(original_file_path)
             num_pages = len(doc_pdf)
             self.logger.info(f"Processing PDF document with {num_pages} pages")
-            
+            # Record the page count up-front so the UI knows it even if a later
+            # page crashes processing.
+            WorkerRepository.set_page_count(document_id, num_pages)
+
             for page_idx in range(num_pages):
                 page_num = page_idx + 1
                 self.logger.info(f"Processing page {page_num}/{num_pages}...")
@@ -166,6 +169,7 @@ class ProcessingEngine:
             # Process single-page image
             page_num = 1
             self.logger.info(f"Processing image document {base_name}")
+            WorkerRepository.set_page_count(document_id, 1)
             
             # Apply full preprocessor (deskew, CLAHE, denoising, binarization) for single images
             preprocessed_path = os.path.join(

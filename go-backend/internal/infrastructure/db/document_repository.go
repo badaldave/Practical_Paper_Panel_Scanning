@@ -58,14 +58,14 @@ func (r *DocumentRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain
 
 	if err == nil {
 		query = `
-			SELECT d.id, d.tenant_id, d.name, d.file_path, d.file_size, d.mime_type, d.status, d.progress_percentage, d.template_id, d.uploaded_by, d.created_at, d.updated_at` + errMsgSubquery + `
+			SELECT d.id, d.tenant_id, d.name, d.file_path, d.file_size, d.mime_type, d.status, d.progress_percentage, d.page_count, d.template_id, d.uploaded_by, d.created_at, d.updated_at` + errMsgSubquery + `
 			FROM documents d
 			WHERE d.id = $1 AND d.tenant_id = $2
 		`
 		args = []interface{}{id, tenantID}
 	} else {
 		query = `
-			SELECT d.id, d.tenant_id, d.name, d.file_path, d.file_size, d.mime_type, d.status, d.progress_percentage, d.template_id, d.uploaded_by, d.created_at, d.updated_at` + errMsgSubquery + `
+			SELECT d.id, d.tenant_id, d.name, d.file_path, d.file_size, d.mime_type, d.status, d.progress_percentage, d.page_count, d.template_id, d.uploaded_by, d.created_at, d.updated_at` + errMsgSubquery + `
 			FROM documents d
 			WHERE d.id = $1
 		`
@@ -74,6 +74,7 @@ func (r *DocumentRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain
 
 	var doc domain.Document
 	var errMsg sql.NullString
+	var pageCount sql.NullInt64
 	err = r.db.QueryRowContext(ctx, query, args...).Scan(
 		&doc.ID,
 		&doc.TenantID,
@@ -83,6 +84,7 @@ func (r *DocumentRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain
 		&doc.MimeType,
 		&doc.Status,
 		&doc.ProgressPercentage,
+		&pageCount,
 		&doc.TemplateID,
 		&doc.UploadedBy,
 		&doc.CreatedAt,
@@ -94,6 +96,10 @@ func (r *DocumentRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain
 			return nil, nil
 		}
 		return nil, fmt.Errorf("failed to get document by ID: %w", err)
+	}
+	if pageCount.Valid {
+		pc := int(pageCount.Int64)
+		doc.PageCount = &pc
 	}
 	if errMsg.Valid && errMsg.String != "" {
 		doc.ErrorMessage = &errMsg.String
@@ -111,7 +117,7 @@ func (r *DocumentRepository) GetByTenant(ctx context.Context, tenantID uuid.UUID
 	// Only surface the latest job's error_message for documents that actually
 	// failed, so a stale message left on a since-succeeded job is never shown.
 	query := `
-		SELECT d.id, d.tenant_id, d.name, d.file_path, d.file_size, d.mime_type, d.status, d.progress_percentage, d.template_id, d.uploaded_by, d.created_at, d.updated_at,
+		SELECT d.id, d.tenant_id, d.name, d.file_path, d.file_size, d.mime_type, d.status, d.progress_percentage, d.page_count, d.template_id, d.uploaded_by, d.created_at, d.updated_at,
 			CASE WHEN d.status = 'failed' THEN (
 				SELECT pj.error_message FROM processing_jobs pj
 				WHERE pj.document_id = d.id
@@ -132,6 +138,7 @@ func (r *DocumentRepository) GetByTenant(ctx context.Context, tenantID uuid.UUID
 	for rows.Next() {
 		var doc domain.Document
 		var errMsg sql.NullString
+		var pageCount sql.NullInt64
 		err := rows.Scan(
 			&doc.ID,
 			&doc.TenantID,
@@ -141,6 +148,7 @@ func (r *DocumentRepository) GetByTenant(ctx context.Context, tenantID uuid.UUID
 			&doc.MimeType,
 			&doc.Status,
 			&doc.ProgressPercentage,
+			&pageCount,
 			&doc.TemplateID,
 			&doc.UploadedBy,
 			&doc.CreatedAt,
@@ -149,6 +157,10 @@ func (r *DocumentRepository) GetByTenant(ctx context.Context, tenantID uuid.UUID
 		)
 		if err != nil {
 			return nil, err
+		}
+		if pageCount.Valid {
+			pc := int(pageCount.Int64)
+			doc.PageCount = &pc
 		}
 		if errMsg.Valid && errMsg.String != "" {
 			doc.ErrorMessage = &errMsg.String

@@ -97,7 +97,10 @@ class WorkerRepository:
         query = """
             UPDATE processing_jobs
             SET status = CASE WHEN attempts < max_attempts THEN 'retrying' ELSE 'failed' END,
-                error_message = 'Reclaimed: worker restarted with this job in-flight (crash recovery)',
+                error_message = CASE WHEN attempts < max_attempts
+                    THEN 'Worker restarted mid-job; automatically re-queued (crash recovery).'
+                    ELSE 'Processing failed: the worker crashed repeatedly while reading this document and has reached the maximum number of attempts. The file may be too large or complex for the available memory, or a page may be unreadable. Please try again or contact support.'
+                END,
                 locked_at = NULL,
                 locked_by = NULL,
                 run_at = %s,
@@ -176,6 +179,19 @@ class WorkerRepository:
             with conn.cursor() as cur:
                 cur.execute("UPDATE processing_jobs SET status = 'failed', error_message = %s, locked_at = NULL, locked_by = NULL, updated_at = %s WHERE id = %s", (reason, datetime.utcnow(), job_id))
                 cur.execute("UPDATE documents SET status = 'failed', progress_percentage = 0, updated_at = %s WHERE id = %s", (datetime.utcnow(), document_id))
+                conn.commit()
+
+    @staticmethod
+    def set_page_count(document_id: str, page_count: int):
+        """Record how many pages the source file has, as soon as it is known (when
+        the worker opens the file), so the UI can show it even if extraction later
+        fails part-way through."""
+        with DBConnection.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE documents SET page_count = %s, updated_at = %s WHERE id = %s",
+                    (page_count, datetime.utcnow(), document_id)
+                )
                 conn.commit()
 
     @staticmethod

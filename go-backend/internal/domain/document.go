@@ -17,6 +17,10 @@ type Document struct {
 	MimeType   string     `json:"mime_type"`
 	Status             string     `json:"status"` // 'uploaded', 'queued', 'processing', 'extracted', 'failed', 'verified'
 	ProgressPercentage int        `json:"progress_percentage"`
+	// PageCount is how many pages the source file has, written by the worker when
+	// it opens the file (so it is known even if extraction fails part-way). nil
+	// until the worker has picked the document up.
+	PageCount          *int       `json:"page_count,omitempty"`
 	// ErrorMessage carries the reason a document's processing job failed, sourced
 	// from the latest processing_jobs row. Populated for surfacing in the UI; nil
 	// when there is no failure to report.
