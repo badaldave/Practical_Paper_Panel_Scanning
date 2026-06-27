@@ -80,6 +80,64 @@ class WorkerRepository:
         return len(reaped)
 
     @staticmethod
+    def reclaim_own_jobs() -> int:
+        """Crash recovery on startup: re-queue any job still marked 'processing'
+        under THIS worker's id. A worker that is (re)starting cannot actually be
+        running anything, so such a row is necessarily an orphan left by a crash —
+        reclaim it immediately regardless of how long ago it was locked. (The
+        age-based reaper would otherwise ignore a freshly-crashed job for the whole
+        JOB_STALE_TIMEOUT window, which is exactly how a crashed worker used to
+        leave its own upload stuck.) Jobs that have exhausted their attempts are
+        failed permanently. Returns count reclaimed.
+
+        Safe because WORKER_ID is a single-instance identity: each concurrently
+        running worker must have a distinct WORKER_ID (e.g. docker-ocr-worker-01
+        vs docker-gpu-worker-01), so we never yank a job from a live sibling."""
+        now = datetime.utcnow()
+        query = """
+            UPDATE processing_jobs
+            SET status = CASE WHEN attempts < max_attempts THEN 'retrying' ELSE 'failed' END,
+                error_message = 'Reclaimed: worker restarted with this job in-flight (crash recovery)',
+                locked_at = NULL,
+                locked_by = NULL,
+                run_at = %s,
+                updated_at = %s
+            WHERE status = 'processing'
+              AND locked_by = %s
+            RETURNING id, document_id, status
+        """
+        with DBConnection.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, (now, now, Config.WORKER_ID))
+                reaped = cur.fetchall()
+                for r in reaped:
+                    new_doc_status = "failed" if r["status"] == "failed" else "queued"
+                    cur.execute(
+                        "UPDATE documents SET status = %s, updated_at = %s WHERE id = %s",
+                        (new_doc_status, now, r["document_id"])
+                    )
+                conn.commit()
+        return len(reaped)
+
+    @staticmethod
+    def heartbeat_job(job_id: str) -> None:
+        """Refresh a running job's lock so the reaper treats locked_at as a liveness
+        signal, not just an age. A healthy job that runs longer than
+        JOB_STALE_TIMEOUT keeps beating and is never mistaken for a dead one; a
+        worker that actually dies stops beating and is reclaimed promptly. Scoped to
+        our own WORKER_ID + 'processing' so a heartbeat can never revive a job the
+        reaper already handed to someone else."""
+        now = datetime.utcnow()
+        with DBConnection.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE processing_jobs SET locked_at = %s, updated_at = %s "
+                    "WHERE id = %s AND locked_by = %s AND status = 'processing'",
+                    (now, now, job_id, Config.WORKER_ID)
+                )
+                conn.commit()
+
+    @staticmethod
     def record_job_attempt(job_id: str, attempt_num: int):
         query = """
             INSERT INTO job_attempts (id, job_id, attempt_number, started_at, status, created_at)

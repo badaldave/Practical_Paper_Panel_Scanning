@@ -2,6 +2,7 @@ import torch
 import time
 import logging
 import sys
+import threading
 from datetime import datetime, timedelta
 import psycopg
 from app.config import Config
@@ -16,6 +17,29 @@ logging.basicConfig(
 )
 logger = logging.getLogger("OCRWorkerDaemon")
 
+
+def _process_with_heartbeat(engine, job_id, doc_id, tenant_id):
+    """Run the pipeline while a background thread keeps the job's lock fresh, so a
+    long-but-healthy document is never mistaken for a dead worker by the reaper.
+    The heartbeat stops the moment processing returns or raises."""
+    stop = threading.Event()
+
+    def beat():
+        while not stop.wait(Config.HEARTBEAT_INTERVAL_SECONDS):
+            try:
+                WorkerRepository.heartbeat_job(job_id)
+            except Exception as hb_err:
+                logger.warning(f"Heartbeat failed for job {job_id}: {hb_err}")
+
+    hb = threading.Thread(target=beat, name=f"heartbeat-{job_id}", daemon=True)
+    hb.start()
+    try:
+        engine.process_document(doc_id, tenant_id)
+    finally:
+        stop.set()
+        hb.join(timeout=5)
+
+
 def main():
 	logger.info(f"Starting OCR Worker Daemon (Worker ID: {Config.WORKER_ID})")
 	
@@ -29,8 +53,20 @@ def main():
 
 	poll_interval = Config.POLL_INTERVAL
 
-	# Self-healing: on startup, reclaim any jobs a previous (crashed) worker left
-	# stuck in 'processing' so they don't sit there forever.
+	# Self-healing #1 (crash recovery): a worker that is *starting up* cannot be
+	# running anything, so any job still 'processing' under our own WORKER_ID is an
+	# orphan from a crash. Reclaim it immediately — independent of the stale
+	# timeout — so a crashed worker recovers its own in-flight job within seconds
+	# of restarting instead of leaving it stuck for the whole timeout window.
+	try:
+		own = WorkerRepository.reclaim_own_jobs()
+		if own:
+			logger.warning(f"Startup crash recovery: re-queued {own} job(s) this worker left in-flight.")
+	except Exception as own_err:
+		logger.error(f"Startup crash recovery failed: {own_err}")
+
+	# Self-healing #2: on startup, reclaim any jobs a *different* worker left stuck
+	# in 'processing' past the stale timeout so they don't sit there forever.
 	try:
 		reclaimed = WorkerRepository.reap_stale_jobs()
 		if reclaimed:
@@ -72,9 +108,10 @@ def main():
 			attempt_id = WorkerRepository.record_job_attempt(job_id, attempts)
 			
 			try:
-				# Run processing pipeline
+				# Run processing pipeline (heartbeating the lock so a slow-but-alive
+				# job is never reclaimed out from under us by the reaper).
 				start_time = datetime.utcnow()
-				engine.process_document(doc_id, tenant_id)
+				_process_with_heartbeat(engine, job_id, doc_id, tenant_id)
 				
 				# Update status
 				WorkerRepository.complete_job(job_id, doc_id)
