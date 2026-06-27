@@ -2,15 +2,33 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"encoding/json"
 	"log"
+	"math/big"
 	"os"
+	"strings"
 
 	"github.com/google/uuid"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"university-result-processing/backend/internal/pkg/crypto"
 )
+
+// randomPassword returns a cryptographically-random password of n characters
+// drawn from an alphabet that satisfies the >=8 char password policy.
+func randomPassword(n int) (string, error) {
+	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*"
+	b := make([]byte, n)
+	for i := range b {
+		idx, err := rand.Int(rand.Reader, big.NewInt(int64(len(alphabet))))
+		if err != nil {
+			return "", err
+		}
+		b[i] = alphabet[idx.Int64()]
+	}
+	return string(b), nil
+}
 
 func main() {
 	log.Println("Starting database seeding process...")
@@ -46,20 +64,38 @@ func main() {
 
 	// 2. Seed User
 	userID := uuid.MustParse("c869fb1e-cfa1-4560-9bb3-5bb28e2195f2")
-	// Password is "PasswordArgon2!12" hashed
-	passHash, err := crypto.HashPassword("PasswordArgon2!12")
+	// Admin credentials come from the environment so no known default is committed
+	// to source. SEED_ADMIN_EMAIL defaults to the company domain; SEED_ADMIN_PASSWORD,
+	// if unset, is randomly generated and printed once below.
+	adminEmail := strings.TrimSpace(strings.ToLower(os.Getenv("SEED_ADMIN_EMAIL")))
+	if adminEmail == "" {
+		adminEmail = "admin@micronicinfo.com"
+	}
+	adminPassword := os.Getenv("SEED_ADMIN_PASSWORD")
+	generatedPassword := false
+	if adminPassword == "" {
+		adminPassword, err = randomPassword(20)
+		if err != nil {
+			log.Fatalf("Failed to generate admin password: %v", err)
+		}
+		generatedPassword = true
+	}
+	passHash, err := crypto.HashPassword(adminPassword)
 	if err != nil {
 		log.Fatalf("Failed to hash password: %v", err)
 	}
 	_, err = db.ExecContext(ctx, `
 		INSERT INTO users (id, tenant_id, email, password_hash, first_name, last_name, status)
-		VALUES ($1, $2, 'admin@micronicinfo.com', $3, 'Admin', 'User', 'active')
+		VALUES ($1, $2, $3, $4, 'Admin', 'User', 'active')
 		ON CONFLICT (id) DO UPDATE SET email = EXCLUDED.email, password_hash = EXCLUDED.password_hash, status = EXCLUDED.status
-	`, userID, tenantID, passHash)
+	`, userID, tenantID, adminEmail, passHash)
 	if err != nil {
 		log.Fatalf("Failed to seed user: %v", err)
 	}
-	log.Println("User seeded.")
+	log.Printf("User seeded (email: %s).", adminEmail)
+	if generatedPassword {
+		log.Printf("Generated admin password (shown once, store it now): %s", adminPassword)
+	}
 
 	// 3. Seed Document
 	docID := uuid.Nil // 00000000-0000-0000-0000-000000000000

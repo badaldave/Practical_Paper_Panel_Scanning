@@ -5,9 +5,9 @@ import { COMPANY_NAME, COMPANY_SHORT, PRODUCT_NAME } from '@/shared/config/brand
 
 export const LoginPage: React.FC = () => {
   const navigate = useNavigate();
-  const [domain, setDomain] = useState('micronicinfo.com');
-  const [email, setEmail] = useState('admin@micronicinfo.com');
-  const [password, setPassword] = useState('PasswordArgon2!12');
+  const [domain, setDomain] = useState('');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
 
@@ -42,13 +42,6 @@ export const LoginPage: React.FC = () => {
     } finally {
       setIsLoading(false);
     }
-  };
-
-  const handleSandboxAutofill = () => {
-    setDomain('micronicinfo.com');
-    setEmail('admin@micronicinfo.com');
-    setPassword('PasswordArgon2!12');
-    setError(null);
   };
 
   return (
@@ -87,7 +80,7 @@ export const LoginPage: React.FC = () => {
                 required
                 value={domain}
                 onChange={(e) => setDomain(e.target.value)}
-                placeholder="e.g. micronicinfo.com"
+                placeholder="e.g. yourcompany.com"
                 className="w-full pl-10 pr-4 py-2.5 bg-slate-950/60 border border-slate-800 focus:border-blue-500/80 focus:ring-1 focus:ring-blue-500/30 rounded-xl text-sm text-white placeholder-slate-600 outline-none transition"
               />
             </div>
@@ -103,7 +96,7 @@ export const LoginPage: React.FC = () => {
                 required
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
-                placeholder="admin@micronicinfo.com"
+                placeholder="you@yourcompany.com"
                 className="w-full pl-10 pr-4 py-2.5 bg-slate-950/60 border border-slate-800 focus:border-blue-500/80 focus:ring-1 focus:ring-blue-500/30 rounded-xl text-sm text-white placeholder-slate-600 outline-none transition"
               />
             </div>
@@ -141,17 +134,6 @@ export const LoginPage: React.FC = () => {
             )}
           </button>
         </form>
-
-        {/* Sandbox autofill helper */}
-        <div className="mt-6 pt-6 border-t border-slate-800/80 text-center">
-          <p className="text-xs text-slate-500">Developing locally in sandbox?</p>
-          <button
-            onClick={handleSandboxAutofill}
-            className="mt-2 text-xs text-blue-400 hover:text-blue-300 font-semibold transition underline"
-          >
-            Autofill Mock Admin Credentials
-          </button>
-        </div>
       </div>
     </div>
   );
