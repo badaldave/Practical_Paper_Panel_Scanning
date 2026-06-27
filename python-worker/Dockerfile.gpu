@@ -1,20 +1,30 @@
-# GPU build of the OCR worker. Runs on any NVIDIA host that has the NVIDIA driver
-# + NVIDIA Container Toolkit installed (Linux, or Windows via WSL2). The image
-# carries CUDA + cuDNN, so the host needs NO Python/CUDA install of its own.
+# GPU build of the OCR worker, tuned for NVIDIA Blackwell (RTX 50-series, e.g.
+# the RTX 5070 — compute capability sm_120). Runs on any NVIDIA host with the
+# NVIDIA driver (>= 570 for Blackwell) + NVIDIA Container Toolkit installed. The
+# image carries CUDA + cuDNN, so the host needs NO Python/CUDA install of its own.
 #
-# Defaults target CUDA 11.8 (matches paddlepaddle-gpu 2.6.2). To move to another
-# CUDA line, override the build args — all three must agree:
+# DESIGN — split GPU/CPU, single image, automatic fallback:
+#   * Surya / DocTR (torch-based) run the HANDWRITING pass on the GPU. torch
+#     auto-selects CUDA when a usable GPU is visible and FALLS BACK TO CPU
+#     otherwise, so this same image also runs (CPU-only) on a host with no GPU
+#     or if the driver breaks — the worker keeps running instead of dying.
+#   * PaddleOCR runs the PRINTED columns on the CPU on purpose: paddlepaddle-gpu
+#     has no Blackwell build, and printed OCR is cheap. Keeping Paddle on its
+#     current 2.x line also avoids a PaddleOCR-3.x API migration.
+#
+# Blackwell needs CUDA 12.8+. The old 11.8 default does NOT run on a 5070 (torch
+# would silently fall back to CPU). To move to another CUDA line, both args must
+# agree (CUDA base image <-> torch index). cu128 torch needs PyTorch >= 2.7.
 #   docker build -f Dockerfile.gpu \
-#     --build-arg CUDA_TAG=12.3.2-cudnn9-runtime-ubuntu22.04 \
-#     --build-arg PADDLE_INDEX=https://www.paddlepaddle.org.cn/packages/stable/cu123/ \
-#     --build-arg TORCH_INDEX=https://download.pytorch.org/whl/cu121 -t ocr-worker:gpu .
-ARG CUDA_TAG=11.8.0-cudnn8-runtime-ubuntu22.04
+#     --build-arg CUDA_TAG=12.9.0-cudnn-runtime-ubuntu22.04 \
+#     --build-arg TORCH_INDEX=https://download.pytorch.org/whl/cu129 -t ocr-worker:gpu .
+ARG CUDA_TAG=12.8.0-cudnn-runtime-ubuntu22.04
 FROM nvidia/cuda:${CUDA_TAG}
 
-# CUDA-matched package sources (see note above before changing).
-ARG PADDLE_PKG=paddlepaddle-gpu==2.6.2
-ARG PADDLE_INDEX=https://www.paddlepaddle.org.cn/packages/stable/cu118/
-ARG TORCH_INDEX=https://download.pytorch.org/whl/cu118
+# torch built for the matching CUDA line (cu128 = Blackwell-capable).
+ARG TORCH_INDEX=https://download.pytorch.org/whl/cu128
+# PaddlePaddle is CPU-only by design (no GPU wheel, no Blackwell concern).
+ARG PADDLE_PKG=paddlepaddle==2.6.2
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
@@ -33,13 +43,15 @@ WORKDIR /app
 
 RUN python -m pip install --no-cache-dir --upgrade pip
 
-# 1) GPU PyTorch first, from the CUDA-matched index (surya/doctr reuse it).
+# 1) GPU PyTorch first, from the CUDA-matched index (Surya/DocTR use it; it also
+#    runs fine CPU-only on a GPU-less host — torch.cuda.is_available() -> False).
 RUN python -m pip install --no-cache-dir torch torchvision --index-url ${TORCH_INDEX}
 
-# 2) GPU PaddlePaddle, from the CUDA-matched Paddle index.
-RUN python -m pip install --no-cache-dir ${PADDLE_PKG} -i ${PADDLE_INDEX}
+# 2) CPU PaddlePaddle from PyPI (Paddle stays on CPU by design).
+RUN python -m pip install --no-cache-dir ${PADDLE_PKG}
 
-# 3) Everything else from PyPI (CPU torch/paddle deliberately excluded).
+# 3) Everything else (paddleocr, surya-ocr, doctr, ...) from PyPI. torch/paddle
+#    are already installed above, so this step won't pull CPU-only replacements.
 COPY requirements-gpu.txt .
 RUN python -m pip install --no-cache-dir -r requirements-gpu.txt
 

@@ -20,7 +20,18 @@ class SuryaOCRProvider(OCRProvider):
                 self.foundation_predictor = FoundationPredictor()
                 self.det_predictor = DetectionPredictor()
                 self.rec_predictor = RecognitionPredictor(self.foundation_predictor)
-                self.logger.info("Surya OCR models loaded successfully.")
+                # Surya/torch auto-select CUDA when a usable GPU is present and
+                # fall back to CPU otherwise. Log which path we got so operators
+                # can confirm GPU acceleration without a separate check.
+                try:
+                    import torch
+                    if torch.cuda.is_available():
+                        device = f"GPU ({torch.cuda.get_device_name(0)})"
+                    else:
+                        device = "CPU (no usable CUDA device — auto fallback)"
+                except Exception:
+                    device = "unknown (torch not importable)"
+                self.logger.info(f"Surya OCR models loaded successfully. Inference device: {device}")
             except Exception as e:
                 self.logger.error(f"Failed to load Surya OCR models: {e}")
                 self.foundation_predictor = None
