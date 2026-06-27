@@ -304,14 +304,6 @@ func (h *ExportHandler) ExportExcel(c *gin.Context) {
 	writer.Comma = '\t' // Excel Tab-delimited
 	defer writer.Flush()
 
-	// Metadata headers
-	_ = writer.Write([]string{"# METADATA SHEET"})
-	_ = writer.Write([]string{"Document Name", doc.Name})
-	_ = writer.Write([]string{"Upload Date", doc.CreatedAt.Format(time.RFC3339)})
-	_ = writer.Write([]string{"Review Status", doc.Status})
-	_ = writer.Write([]string{"Export Timestamp", time.Now().Format(time.RFC3339)})
-	_ = writer.Write([]string{""}) // Empty row separator
-
 	// Data Headers: Page, Row, [value cols in display order], [page metadata], [confidences]
 	header := []string{"Page", "Row"}
 	for _, col := range colOrder {

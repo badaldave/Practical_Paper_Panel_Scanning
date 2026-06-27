@@ -682,15 +682,44 @@ class ProcessingEngine:
                 {"column_index": 3, "value": mobile, "confidence": mc, "bbox": mb},
             ]})
 
-        # The subcode is printed and identical for every row on a page; fill any
-        # row whose subcode failed to OCR with the page's dominant value.
+        # The subcode is printed, so every row sharing a subject must show the same
+        # value. OCR reads it slightly differently per row (BOT-75P-302 vs
+        # BOT-75SP-302, B0T..., or blank), which surfaced as different subcodes
+        # within one page. Most pages carry a single subject, but a page can
+        # legitimately hold more than one — so we don't force one value page-wide.
+        # Instead, cluster near-identical reads (OCR noise of the same printed
+        # code) and snap each row to its cluster's voted value, leaving a genuinely
+        # different subject in its own cluster untouched. Confidence = fraction of
+        # the cluster's rows whose own OCR already matched the winner.
+        import difflib
         from collections import Counter
+
+        def cluster_seed(value, seeds):
+            for s in seeds:
+                if difflib.SequenceMatcher(None, value, s).ratio() >= 0.7:
+                    return s
+            return None
+
         subs = [r["cells"][0]["value"] for r in rows if r["cells"][0]["value"]]
         if subs:
-            mode_sub = Counter(subs).most_common(1)[0][0]
+            clusters = {}  # seed read -> list of member reads (same printed subject)
+            for v in subs:
+                s = cluster_seed(v, clusters)
+                clusters.setdefault(v if s is None else s, []).append(v)
+            canon, conf_of = {}, {}  # seed -> voted value / within-cluster agreement
+            for seed, members in clusters.items():
+                counts = Counter(members)
+                winner, hits = counts.most_common(1)[0]
+                canon[seed] = winner
+                conf_of[seed] = hits / len(members)
+            # Rows whose subcode failed to OCR inherit the page's dominant subject.
+            dominant = max(clusters, key=lambda s: len(clusters[s]))
             for r in rows:
-                if not r["cells"][0]["value"]:
-                    r["cells"][0]["value"] = mode_sub
+                v = r["cells"][0]["value"]
+                seed = dominant if not v else cluster_seed(v, clusters)
+                if seed is not None:
+                    r["cells"][0]["value"] = canon[seed]
+                    r["cells"][0]["confidence"] = conf_of[seed]
 
         return wrap(rows)
 
@@ -710,7 +739,17 @@ class ProcessingEngine:
             self._surya = {"rec": RecognitionPredictor(fp),
                            "det": DetectionPredictor(),
                            "task": TaskNames.ocr_with_boxes}
-            self.logger.info("Surya handwriting OCR loaded.")
+            # Surya/torch auto-select CUDA when a usable GPU is present and fall
+            # back to CPU otherwise. Log which path we got so operators can confirm
+            # GPU acceleration of the handwriting pass without a separate check.
+            try:
+                import torch
+                device = (f"GPU ({torch.cuda.get_device_name(0)})"
+                          if torch.cuda.is_available()
+                          else "CPU (no usable CUDA device — auto fallback)")
+            except Exception:
+                device = "unknown (torch not importable)"
+            self.logger.info(f"Surya handwriting OCR loaded. Inference device: {device}")
         except Exception as e:
             self.logger.warning(f"Surya handwriting OCR unavailable; using Paddle only for names/mobiles: {e}")
             self._surya = None
