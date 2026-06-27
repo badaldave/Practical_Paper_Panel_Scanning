@@ -2,10 +2,13 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"log"
+	"math/big"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -23,6 +26,7 @@ import (
 	"university-result-processing/backend/internal/infrastructure/storage"
 	httpRouter "university-result-processing/backend/internal/interfaces/http"
 	"university-result-processing/backend/internal/interfaces/http/handlers"
+	"university-result-processing/backend/internal/pkg/crypto"
 )
 
 func main() {
@@ -77,6 +81,11 @@ func main() {
 
 	// Seed permission catalog, shared system roles, and their grants if needed
 	seedRolesAndPermissions(database)
+
+	// Bootstrap a tenant + first admin on a fresh database so the platform is
+	// immediately usable without a separate `cmd/seed` run. No-op once any user
+	// exists, so a rotated admin password is never clobbered on restart.
+	bootstrapAdmin(database)
 
 	// 5. Initialize Services
 	authService := auth.NewAuthService(tenantRepo, userRepo, jwtSecret)
@@ -240,6 +249,111 @@ func seedRolesAndPermissions(database *db.DB) {
 			log.Printf("grant permissions for role %s failed: %v", r.Name, err)
 		}
 	}
+}
+
+// bootstrapTenantID is the canonical single-tenant ID used by both this
+// startup bootstrap and cmd/seed, so they converge on one tenant rather than
+// creating duplicates.
+const bootstrapTenantID = "e93fca1e-1f7c-47bc-87c2-127e7740e53a"
+
+// bootstrapAdmin ensures the platform is usable on a fresh database: it creates
+// the default tenant (if absent) and, only when the tenant has no users yet, a
+// System Admin user. Credentials come from SEED_ADMIN_EMAIL/SEED_ADMIN_PASSWORD;
+// an unset password is randomly generated and printed once. It is idempotent —
+// once any user exists it does nothing, so restarts never overwrite a password
+// the operator has since changed.
+func bootstrapAdmin(database *db.DB) {
+	tenantID := uuid.MustParse(bootstrapTenantID)
+
+	tenantName := strings.TrimSpace(os.Getenv("SEED_TENANT_NAME"))
+	if tenantName == "" {
+		tenantName = "Micronic Infotech Services Private Limited"
+	}
+	tenantDomain := strings.TrimSpace(strings.ToLower(os.Getenv("SEED_TENANT_DOMAIN")))
+	if tenantDomain == "" {
+		tenantDomain = "micronicinfo.com"
+	}
+
+	// Create the tenant if it isn't there. DO NOTHING keeps an existing tenant's
+	// name/domain intact across restarts.
+	if _, err := database.Exec(`
+		INSERT INTO tenants (id, name, domain, settings)
+		VALUES ($1, $2, $3, '{}'::jsonb)
+		ON CONFLICT (id) DO NOTHING
+	`, tenantID, tenantName, tenantDomain); err != nil {
+		log.Printf("bootstrap tenant failed: %v", err)
+		return
+	}
+
+	// Only seed an admin when this tenant has no users at all.
+	var userCount int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM users WHERE tenant_id = $1`, tenantID).Scan(&userCount); err != nil {
+		log.Printf("bootstrap admin: user count check failed: %v", err)
+		return
+	}
+	if userCount > 0 {
+		return
+	}
+
+	adminEmail := strings.TrimSpace(strings.ToLower(os.Getenv("SEED_ADMIN_EMAIL")))
+	if adminEmail == "" {
+		adminEmail = "admin@" + tenantDomain
+	}
+	adminPassword := os.Getenv("SEED_ADMIN_PASSWORD")
+	generated := false
+	if adminPassword == "" {
+		var err error
+		adminPassword, err = randomPassword(20)
+		if err != nil {
+			log.Printf("bootstrap admin: password generation failed: %v", err)
+			return
+		}
+		generated = true
+	}
+
+	passHash, err := crypto.HashPassword(adminPassword)
+	if err != nil {
+		log.Printf("bootstrap admin: password hashing failed: %v", err)
+		return
+	}
+
+	userID := uuid.New()
+	if _, err := database.Exec(`
+		INSERT INTO users (id, tenant_id, email, password_hash, first_name, last_name, status)
+		VALUES ($1, $2, $3, $4, 'Admin', 'User', 'active')
+	`, userID, tenantID, adminEmail, passHash); err != nil {
+		log.Printf("bootstrap admin: user insert failed: %v", err)
+		return
+	}
+
+	// Grant System Admin (shared system role, tenant_id IS NULL).
+	if _, err := database.Exec(`
+		INSERT INTO user_roles (user_id, role_id)
+		SELECT $1, id FROM roles WHERE tenant_id IS NULL AND name = 'System Admin'
+		ON CONFLICT DO NOTHING
+	`, userID); err != nil {
+		log.Printf("bootstrap admin: role grant failed: %v", err)
+	}
+
+	log.Printf("Bootstrapped first admin (tenant domain: %s, email: %s).", tenantDomain, adminEmail)
+	if generated {
+		log.Printf("Generated admin password (shown once, store it now): %s", adminPassword)
+	}
+}
+
+// randomPassword returns a cryptographically-random password of n characters
+// satisfying the >=8 char password policy.
+func randomPassword(n int) (string, error) {
+	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*"
+	b := make([]byte, n)
+	for i := range b {
+		idx, err := rand.Int(rand.Reader, big.NewInt(int64(len(alphabet))))
+		if err != nil {
+			return "", err
+		}
+		b[i] = alphabet[idx.Int64()]
+	}
+	return string(b), nil
 }
 
 // startMockJobProcessor acts as a lightweight local polling worker in case the Python OCR daemon isn't running.

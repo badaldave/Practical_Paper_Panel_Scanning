@@ -31,6 +31,13 @@ services:
       JWT_SECRET: "platform_jwt_secure_signing_secret_key_2026"
       UPLOAD_DIR: "/var/data/uploads"
       MOCK_WORKER: "false"
+      # First-run admin bootstrap. Set these in a root .env file to override;
+      # leaving SEED_ADMIN_PASSWORD empty generates a random one (printed once
+      # to this service's log on first startup).
+      SEED_ADMIN_EMAIL: "${SEED_ADMIN_EMAIL:-}"
+      SEED_ADMIN_PASSWORD: "${SEED_ADMIN_PASSWORD:-}"
+      SEED_TENANT_NAME: "${SEED_TENANT_NAME:-}"
+      SEED_TENANT_DOMAIN: "${SEED_TENANT_DOMAIN:-}"
     ports:
       - "8081:8081"
     volumes:
