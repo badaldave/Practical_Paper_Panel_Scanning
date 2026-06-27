@@ -274,7 +274,7 @@ export const VerificationPage: React.FC = () => {
   const columnDefs = useMemo(() => {
     const pageCells = cells.filter(c => c.page_number === currentPage);
     
-    let maxCol = 3; // default to showing 4 columns (0 to 3) even if empty
+    let maxCol = 4; // default to showing 5 columns (Subject ID/Code, Batch, Name, Mobile)
     pageCells.forEach(c => {
       if (c.column_index > maxCol) maxCol = c.column_index;
     });
@@ -289,12 +289,20 @@ export const VerificationPage: React.FC = () => {
       }
     ];
 
-    for (let c = 0; c <= maxCol; c++) {
-      let colName = `Column ${c}`;
-      if (c === 0) colName = 'Subject Code';
-      else if (c === 1) colName = 'Batch';
-      else if (c === 2) colName = 'Examiner Name';
-      else if (c === 3) colName = 'Mobile Number';
+    // Display order: Subject ID (col 4), Subject Code (col 0), Batch (1),
+    // Examiner Name (2), Mobile Number (3), then any extra columns. Subject ID and
+    // Subject Code come from one merged cell that the worker now splits.
+    const colLabels: Record<number, string> = {
+      4: 'Subject ID', 0: 'Subject Code', 1: 'Batch', 2: 'Examiner Name', 3: 'Mobile Number',
+    };
+    const preferred = [4, 0, 1, 2, 3];
+    const order = [
+      ...preferred.filter((i) => i <= maxCol),
+      ...Array.from({ length: maxCol + 1 }, (_, i) => i).filter((i) => !preferred.includes(i)),
+    ];
+
+    for (const c of order) {
+      const colName = colLabels[c] ?? `Column ${c}`;
 
       cols.push({
         headerName: colName,
@@ -339,7 +347,7 @@ export const VerificationPage: React.FC = () => {
           const cellObj = params.data[`col_${c}`];
           if (!cellObj) return '';
           if (cellObj.is_inferred) {
-            return `Auto-filled from a matching mobile number (inferred) — please verify. Confidence: ${(cellObj.confidence * 100).toFixed(1)}%`;
+            return `Auto-filled by consensus from matching examiner rows (inferred) — please verify. Confidence: ${(cellObj.confidence * 100).toFixed(1)}%`;
           }
           return `Confidence: ${(cellObj.confidence * 100).toFixed(1)}%`;
         }
@@ -375,7 +383,7 @@ export const VerificationPage: React.FC = () => {
 
   const handleAddRow = () => {
     const pageCells = cells.filter(c => c.page_number === currentPage);
-    let maxCol = 3; // default to 4 columns (0 to 3)
+    let maxCol = 4; // default to 5 columns (Subject ID/Code, Batch, Name, Mobile)
     let maxRow = -1;
     pageCells.forEach(c => {
       if (c.column_index > maxCol) maxCol = c.column_index;

@@ -284,6 +284,10 @@ class ProcessingEngine:
                 f"{'…' if len(failed_pages) > 20 else ''}"
             )
 
+        # Split the merged subject cell (e.g. "18124CHE-811N") into a Subject ID
+        # and a Subject Code column before persisting / consensus.
+        self._split_subject_columns(all_tables)
+
         # Apply feedback correction memory mappings
         feedback_rules = WorkerRepository.load_correction_memory(tenant_id)
         memory_layer = FeedbackMemory(feedback_rules)
@@ -319,6 +323,38 @@ class ProcessingEngine:
         WorkerRepository.save_extractions(tenant_id, document_id, {"tables": all_tables})
         
         return True
+
+    def _split_subject_columns(self, all_tables):
+        """The first grid column holds a merged subject value like "18124CHE-811N"
+        — a numeric Subject ID followed by an alphabetic Subject Code. Split it:
+        the code stays in column 0 (Subject Code) and the leading digits go to a
+        new column 4 (Subject ID). Batch/Name/Mobile stay at columns 1/2/3, so the
+        consensus pass and the rest of the pipeline are unaffected; the display and
+        export order them as ID, Code, Batch, Name, Mobile."""
+        import re
+        for table in all_tables:
+            for row in table.get("rows", []):
+                cells = {c["column_index"]: c for c in row.get("cells", [])}
+                sub = cells.get(0)
+                if sub is None:
+                    continue
+                raw = (sub.get("value") or "").strip()
+                m = re.match(r"^\s*(\d{3,})\s*(.*)$", raw)
+                if m:
+                    subject_id, subject_code = m.group(1), m.group(2).strip()
+                else:
+                    subject_id, subject_code = "", raw
+                sub["value"] = subject_code
+                if 4 in cells:
+                    cells[4]["value"] = subject_id
+                else:
+                    row["cells"].append({
+                        "column_index": 4,
+                        "value": subject_id,
+                        "confidence": sub.get("confidence", 0.0),
+                        "bbox": sub.get("bbox") or {"x": 0, "y": 0, "width": 0, "height": 0},
+                        "is_inferred": False,
+                    })
 
     def _extract_page_metadata(self, raw_cells: list, img_w: int, img_h: int) -> dict:
         import re

@@ -139,13 +139,15 @@ def apply_document_consensus(all_tables, examiner_directory=None):
     """Mutate cells in `all_tables` in place. Returns stats dict.
 
     For every row, locates its name cell (col 2) and mobile cell (col 3), clusters
-    rows into examiner entities, then votes a single name and mobile per cluster.
-    Changed cells get `is_inferred=True` and confidence=INFERRED_CONFIDENCE.
+    rows into examiner entities (keyed by mobile), then votes a single NAME per
+    cluster so a poorly-read name borrows from its well-read siblings. Changed name
+    cells get `is_inferred=True` and confidence=INFERRED_CONFIDENCE. Mobile numbers
+    are never inferred — they are left exactly as OCR read them.
 
     When an `examiner_directory` (from `build_examiner_directory`) is supplied,
-    cross-document votes for the same examiner are folded into the name vote and
-    can recover a missing mobile via the name — so a poorly-read row borrows from
-    the whole database, not only from its siblings on this sheet."""
+    cross-document name votes for the same examiner (keyed by mobile) are folded
+    into the name vote, so a poorly-read name borrows from the whole database, not
+    only from its siblings on this sheet."""
     directory = examiner_directory or {}
     mob_to_names = directory.get("mob_to_names", {})
     name_to_mobs = directory.get("name_to_mobs", {})
@@ -203,31 +205,11 @@ def apply_document_consensus(all_tables, examiner_directory=None):
                     if from_db:
                         db_name_backfills += 1
 
-        # MOBILE consensus: plurality vote over valid 10-digit reads. If the
-        # cluster has none, recover the mobile from the directory via the
-        # consensus name — but only when that name maps to a single mobile.
-        mob_reads = [m["mob"] for m in members if len(m["mob"]) == 10]
-        consensus_mob = None
-        mob_from_db = False
-        if mob_reads:
-            consensus_mob = Counter(mob_reads).most_common(1)[0][0]
-        elif consensus is not None:
-            cand = name_to_mobs.get(_nname(consensus))
-            if cand and len(cand) == 1:
-                consensus_mob = next(iter(cand))
-                mob_from_db = True
-        if consensus_mob:
-            for m in members:
-                cell = m["mobile_cell"]
-                if cell is None:
-                    continue
-                if _nmob(cell["value"]) != consensus_mob:
-                    cell["value"] = consensus_mob
-                    cell["confidence"] = INFERRED_CONFIDENCE
-                    cell["is_inferred"] = True
-                    mobile_changes += 1
-                    if mob_from_db:
-                        db_mobile_backfills += 1
+        # MOBILE: intentionally NOT inferred. A mobile number is only ever shown
+        # as OCR actually read it on each row — never voted across sibling rows,
+        # never recovered from a name. Two different examiners can share a name, so
+        # filling a mobile from a name is unsafe; and even cross-row mobile voting
+        # was judged to cost more review than it saves. Mobile cells are left as-is.
 
     return {
         "clusters": len(clusters),
