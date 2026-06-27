@@ -346,14 +346,19 @@ class WorkerRepository:
     def load_examiner_pairs(tenant_id: str, exclude_document_id: str = None) -> list:
         """Cross-document examiner directory source.
 
-        Returns every (name, mobile) pair already stored for this TENANT across
-        all of its documents, so the consensus pass can infer a poorly-read
-        name/mobile from how the same examiner was read on other sheets — not
-        just from sibling rows in the current document.
+        Returns every (name, mobile) pair from this TENANT's HUMAN-VERIFIED
+        documents (verification_status = 'submitted'), so the consensus pass can
+        infer a poorly-read name from how the same examiner was read and corrected
+        on other sheets — not just from sibling rows in the current document.
 
-        Only the latest version of each cell is used (so human corrections win),
-        and the current document is excluded to avoid voting against stale copies
-        of its own cells on reprocessing. Name column = 2, mobile column = 3."""
+        Only submitted documents vote: an extracted-but-unverified duplicate still
+        holds raw OCR misreads, and counting those equally to a human correction
+        lets a stale copy outvote (or tie) the verified value. Gating on
+        verification_status keeps the directory trustworthy.
+
+        Only the latest version of each cell is used (so the final corrected value
+        wins), and the current document is excluded to avoid voting against stale
+        copies of its own cells on reprocessing. Name column = 2, mobile col = 3."""
         params = [tenant_id]
         exclude_clause = ""
         if exclude_document_id:
@@ -368,6 +373,7 @@ class WorkerRepository:
                 FROM extracted_cells c
                 JOIN documents d ON d.id = c.document_id
                 WHERE d.tenant_id = %s
+                  AND d.verification_status = 'submitted'
                   AND c.column_index IN (2, 3)
                   {exclude_clause}
                 ORDER BY c.document_id, c.page_number, c.row_index, c.column_index, c.version DESC
