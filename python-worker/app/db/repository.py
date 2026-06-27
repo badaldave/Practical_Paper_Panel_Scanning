@@ -195,6 +195,19 @@ class WorkerRepository:
                 conn.commit()
 
     @staticmethod
+    def mark_page_failed(document_id: str, page_number: int):
+        """Flag a single page whose OCR crashed/failed so partial results stay
+        usable and the failed page is visible, without failing the whole document."""
+        with DBConnection.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE document_pages SET status = 'failed', updated_at = %s "
+                    "WHERE document_id = %s AND page_number = %s",
+                    (datetime.utcnow(), document_id, page_number)
+                )
+                conn.commit()
+
+    @staticmethod
     def update_document_progress(document_id: str, progress: int):
         with DBConnection.get_connection() as conn:
             with conn.cursor() as cur:

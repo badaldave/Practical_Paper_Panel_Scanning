@@ -8,6 +8,7 @@ import psycopg
 from app.config import Config
 from app.db.repository import WorkerRepository
 from app.pipeline.engine import ProcessingEngine
+from app.processing_errors import NonRetryableProcessingError
 
 # Set up logging configuration
 logging.basicConfig(
@@ -120,13 +121,21 @@ def main():
 				duration = (datetime.utcnow() - start_time).total_seconds()
 				logger.info(f"Job {job_id} completed successfully in {duration:.2f} seconds.")
 				
+			except NonRetryableProcessingError as nr_err:
+				# The environment cannot process this document at all — retrying
+				# would just burn attempts. Fail it permanently, with the reason.
+				err_msg = str(nr_err)
+				logger.error(f"Job {job_id} failed permanently (non-retryable): {err_msg}")
+				WorkerRepository.update_job_attempt(attempt_id, "failed", err_msg)
+				WorkerRepository.fail_job(job_id, doc_id, err_msg)
+
 			except Exception as pipeline_err:
 				err_msg = str(pipeline_err)
 				logger.error(f"Error executing processing pipeline for job {job_id}: {err_msg}")
-				
+
 				# Update attempt status
 				WorkerRepository.update_job_attempt(attempt_id, "failed", err_msg)
-				
+
 				if attempts < max_attempts:
 					# Queue for retry with 30s backoff multiplier
 					next_run = datetime.utcnow() + timedelta(seconds=30 * attempts)

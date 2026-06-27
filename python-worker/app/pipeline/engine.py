@@ -11,6 +11,34 @@ class ProcessingEngine:
         self.preprocessor = ImagePreprocessor()
         self.providers = {}
 
+    def select_ocr_engine(self, priority=None):
+        """Pick the first available provider in priority order, else the first that
+        loads at all (mock mode). Returns (provider, name). Used inside the OCR
+        subprocess so provider selection happens where the models actually run."""
+        priority = priority or Config.OCR_PRIORITY
+        for name in priority:
+            p_name = name.strip().lower()
+            provider = self._get_provider(p_name)
+            if provider and provider.is_available():
+                return provider, p_name
+        for name in priority:
+            p_name = name.strip().lower()
+            provider = self._get_provider(p_name)
+            if provider:
+                return provider, p_name + " (mock)"
+        return None, "mock"
+
+    def ocr_page(self, ocr_engine, image_path, img_w, img_h):
+        """Run the native, crash-prone OCR for a single page: table extraction
+        (Paddle) then handwriting refinement (Surya). Returns the raw cells (for
+        metadata) and the aligned+refined tables. Pure-python alignment is kept
+        here too so the parent only has to persist the result."""
+        extraction_res = ocr_engine.extract_table(image_path)
+        cells = extraction_res.get("cells", [])
+        grouped = self._align_coordinates(cells, img_w, img_h, drop_empty=False)
+        grouped = self._refine_with_handwriting(image_path, grouped, img_w, img_h)
+        return {"cells": cells, "tables": grouped.get("tables", [])}
+
     def _get_provider(self, name: str):
         if name in self.providers:
             return self.providers[name]
@@ -62,36 +90,33 @@ class ProcessingEngine:
                 # If neither exists, raise exception with candidate path tried
                 raise FileNotFoundError(f"Original file not found at {original_file_path} or {candidate_path}")
 
-        # Choose the first active provider according to config priority order that is actually available
-        ocr_engine = None
-        engine_name = "mock"
-        for name in Config.OCR_PRIORITY:
-            p_name = name.strip().lower()
-            provider = self._get_provider(p_name)
-            if provider and provider.is_available():
-                ocr_engine = provider
-                engine_name = p_name
-                break
-        
-        if not ocr_engine:
-            # Fallback to the first provider in priority list (even if running in mock mode)
-            for name in Config.OCR_PRIORITY:
-                p_name = name.strip().lower()
-                provider = self._get_provider(p_name)
-                if provider:
-                    ocr_engine = provider
-                    engine_name = p_name + " (mock)"
-                    break
-        
-        self.logger.info(f"Selected OCR engine: {engine_name} for document {doc['name']}")
+        # OCR runs in an isolated child process (SubprocessPageOCR): a native crash
+        # in a model (segfault / OOM-kill) on one page takes down only that child
+        # and that page, never this daemon. The provider is selected inside the
+        # child, per Config.OCR_PRIORITY.
+        from app.pipeline.page_ocr import SubprocessPageOCR, PageOCRError
+        self.logger.info(f"Starting isolated OCR for document {doc['name']} (priority={Config.OCR_PRIORITY})")
         WorkerRepository.update_document_progress(document_id, 10)
 
         preprocessed_dir = os.path.join(os.path.dirname(original_file_path), "preprocessed")
         os.makedirs(preprocessed_dir, exist_ok=True)
-        
+
         base_name = os.path.basename(original_file_path)
         is_pdf = original_file_path.lower().endswith('.pdf')
         all_tables = []
+
+        # If the OCR child crashes on this many pages in a row, give up on the whole
+        # document rather than respawning the model stack hundreds of times (the
+        # environment almost certainly lacks the memory for it) — fail fast with a
+        # clear reason instead of grinding for hours.
+        MAX_CONSECUTIVE_PAGE_FAILURES = 5
+        failed_pages = []
+        consecutive_failures = 0
+        # Reuse-and-clean: stop any child left over from a previous document so we
+        # never leak more than one OCR subprocess across jobs.
+        if getattr(self, "_page_ocr", None) is not None:
+            self._page_ocr.stop()
+        page_ocr = self._page_ocr = SubprocessPageOCR(Config.OCR_PRIORITY)
 
         if is_pdf:
             import fitz
@@ -131,15 +156,34 @@ class ProcessingEngine:
                     width=pix.width,
                     height=pix.height
                 )
-                
-                # Run OCR directly on the clean page image
-                extraction_res = ocr_engine.extract_table(page_image_path)
-                
+
+                # Run OCR in the isolated child. A native crash here raises
+                # PageOCRError instead of killing the daemon: mark the page failed
+                # and move on (and bail out if too many crash back-to-back).
+                try:
+                    ocr_result = page_ocr.run_page(page_image_path, pix.width, pix.height)
+                except PageOCRError as e:
+                    consecutive_failures += 1
+                    failed_pages.append(page_num)
+                    WorkerRepository.mark_page_failed(document_id, page_num)
+                    self.logger.error(f"Page {page_num}/{num_pages} OCR failed (isolated): {e}")
+                    if consecutive_failures >= MAX_CONSECUTIVE_PAGE_FAILURES:
+                        page_ocr.stop()
+                        self._page_ocr = None
+                        from app.processing_errors import NonRetryableProcessingError
+                        raise NonRetryableProcessingError(
+                            f"OCR crashed on {consecutive_failures} consecutive pages (latest: page {page_num}). "
+                            f"Aborting — the worker environment lacks the memory to OCR this document. "
+                            f"Last error: {e}"
+                        )
+                    continue
+                consecutive_failures = 0
+
                 # Extract page metadata
-                raw_cells = extraction_res.get("cells", [])
+                raw_cells = ocr_result.get("cells", [])
                 meta = self._extract_page_metadata(raw_cells, pix.width, pix.height)
                 self.logger.info(f"Extracted page {page_num} metadata: {meta}")
-                
+
                 # Update page record with metadata
                 WorkerRepository.save_page_record(
                     document_id=document_id,
@@ -154,15 +198,9 @@ class ProcessingEngine:
                     faculty=meta.get("faculty"),
                     total_candidates=meta.get("total_candidates")
                 )
-                
-                # Group cells and align coordinates (keep empty slots so the
-                # handwriting pass can recover rows Paddle missed), then refine
-                # the handwritten name/mobile columns with Surya.
-                grouped_data = self._align_coordinates(extraction_res["cells"], pix.width, pix.height, drop_empty=False)
-                grouped_data = self._refine_with_handwriting(page_image_path, grouped_data, pix.width, pix.height)
 
                 # Map page_number correctly
-                for table in grouped_data.get("tables", []):
+                for table in ocr_result.get("tables", []):
                     table["page_number"] = page_num
                     all_tables.append(table)
         else:
@@ -191,37 +229,60 @@ class ProcessingEngine:
                 height=img_meta["height"]
             )
             WorkerRepository.update_document_progress(document_id, 45)
-            
-            # Run OCR on preprocessed image
-            extraction_res = ocr_engine.extract_table(preprocessed_path)
+
+            # Run OCR in the isolated child (a native crash raises PageOCRError
+            # rather than killing the daemon).
+            try:
+                ocr_result = page_ocr.run_page(preprocessed_path, img_meta["width"], img_meta["height"])
+            except PageOCRError as e:
+                failed_pages.append(page_num)
+                WorkerRepository.mark_page_failed(document_id, page_num)
+                self.logger.error(f"Image OCR failed (isolated): {e}")
+                ocr_result = None
             WorkerRepository.update_document_progress(document_id, 75)
-            
-            # Extract metadata
-            raw_cells = extraction_res.get("cells", [])
-            meta = self._extract_page_metadata(raw_cells, img_meta["width"], img_meta["height"])
-            self.logger.info(f"Extracted image metadata: {meta}")
-            
-            # Update page record with metadata
-            WorkerRepository.save_page_record(
-                document_id=document_id,
-                page_number=page_num,
-                image_path=db_image_path,
-                width=img_meta["width"],
-                height=img_meta["height"],
-                college_code=meta.get("college_code"),
-                college_name=meta.get("college_name"),
-                subject_code=meta.get("subject_code"),
-                subject_name=meta.get("subject_name"),
-                faculty=meta.get("faculty"),
-                total_candidates=meta.get("total_candidates")
+
+            if ocr_result is not None:
+                # Extract metadata
+                raw_cells = ocr_result.get("cells", [])
+                meta = self._extract_page_metadata(raw_cells, img_meta["width"], img_meta["height"])
+                self.logger.info(f"Extracted image metadata: {meta}")
+
+                # Update page record with metadata
+                WorkerRepository.save_page_record(
+                    document_id=document_id,
+                    page_number=page_num,
+                    image_path=db_image_path,
+                    width=img_meta["width"],
+                    height=img_meta["height"],
+                    college_code=meta.get("college_code"),
+                    college_name=meta.get("college_name"),
+                    subject_code=meta.get("subject_code"),
+                    subject_name=meta.get("subject_name"),
+                    faculty=meta.get("faculty"),
+                    total_candidates=meta.get("total_candidates")
+                )
+
+                for table in ocr_result.get("tables", []):
+                    table["page_number"] = page_num
+                    all_tables.append(table)
+
+        # OCR finished (or every page failed) — release the child process.
+        page_ocr.stop()
+        self._page_ocr = None
+
+        # If nothing could be OCR'd, fail the whole job with a clear reason rather
+        # than silently saving an empty document.
+        if failed_pages and not all_tables:
+            from app.processing_errors import NonRetryableProcessingError
+            raise NonRetryableProcessingError(
+                f"OCR failed on all {len(failed_pages)} page(s); no data was extracted. The worker "
+                f"subprocess crashed on every page (most likely out of memory for this document)."
             )
-            
-            # Group cells and align coordinates, then refine handwriting (Surya)
-            grouped_data = self._align_coordinates(extraction_res["cells"], img_meta["width"], img_meta["height"], drop_empty=False)
-            grouped_data = self._refine_with_handwriting(preprocessed_path, grouped_data, img_meta["width"], img_meta["height"])
-            for table in grouped_data.get("tables", []):
-                table["page_number"] = page_num
-                all_tables.append(table)
+        if failed_pages:
+            self.logger.warning(
+                f"{len(failed_pages)} page(s) failed OCR and were skipped: {failed_pages[:20]}"
+                f"{'…' if len(failed_pages) > 20 else ''}"
+            )
 
         # Apply feedback correction memory mappings
         feedback_rules = WorkerRepository.load_correction_memory(tenant_id)
