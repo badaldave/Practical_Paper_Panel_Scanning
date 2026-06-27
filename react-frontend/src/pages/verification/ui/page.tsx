@@ -243,16 +243,30 @@ export const VerificationPage: React.FC = () => {
   // Pivot flat cell list into 2D row structures for AG Grid
   const gridData = useMemo(() => {
     const pageCells = cells.filter(c => c.page_number === currentPage);
-    if (pageCells.length === 0) return [];
-    
-    // Find max row and column
-    let maxRow = 0;
+
+    // Minimum blank rows to surface on a page with little/nothing read, so the
+    // verifier can type straight in (no "Add Row" clicking first). Editing a
+    // blank cell upserts a fresh cell via handleCellValueChanged.
+    const MIN_ENTRY_ROWS = 5;
+
+    // Find max row index
+    let maxRow = -1;
     pageCells.forEach(c => {
       if (c.row_index > maxRow) maxRow = c.row_index;
     });
 
+    let rowCount: number;
+    if (!editable) {
+      // Read-only: show exactly what was read, nothing more.
+      rowCount = maxRow + 1;
+    } else {
+      // Editable: keep one spare trailing blank row (auto-grow — a new row appears
+      // as soon as the last is used) and never drop below the entry-row floor.
+      rowCount = Math.max(maxRow + 2, MIN_ENTRY_ROWS);
+    }
+
     const rows: any[] = [];
-    for (let r = 0; r <= maxRow; r++) {
+    for (let r = 0; r < rowCount; r++) {
       rows.push({ rowIndex: r });
     }
 
@@ -268,7 +282,7 @@ export const VerificationPage: React.FC = () => {
     });
 
     return rows;
-  }, [cells, currentPage]);
+  }, [cells, currentPage, editable]);
 
   // Dynamically generate column definitions for AG Grid
   const columnDefs = useMemo(() => {
@@ -464,7 +478,8 @@ export const VerificationPage: React.FC = () => {
     const newValue = event.newValue;
 
     const cellObj = cells.find(c => c.page_number === currentPage && c.row_index === rowIdx && c.column_index === colIdx);
-    if (!cellObj) return;
+    // No backing cell yet (e.g. a pre-seeded blank row) — upsert a new one.
+    const bbox = cellObj?.bbox || { x: 0, y: 0, width: 0, height: 0 };
 
     try {
       setIsSaving(true);
@@ -475,17 +490,38 @@ export const VerificationPage: React.FC = () => {
           row_index: rowIdx,
           column_index: colIdx,
           value: newValue,
-          bbox: cellObj.bbox
+          bbox
         }
       });
 
-      // Update local cells state to boost edited cell confidence to 100%
-      setCells(prev => prev.map(c => {
-        if (c.page_number === currentPage && c.row_index === rowIdx && c.column_index === colIdx) {
-          return { ...c, current_value: newValue, confidence: 1.0, is_inferred: false };
+      // Update local cells state (boost edited cell confidence to 100%), or add
+      // the cell if it didn't exist yet so the grid/canvas stay in sync.
+      setCells(prev => {
+        if (cellObj) {
+          return prev.map(c => {
+            if (c.page_number === currentPage && c.row_index === rowIdx && c.column_index === colIdx) {
+              return { ...c, current_value: newValue, confidence: 1.0, is_inferred: false };
+            }
+            return c;
+          });
         }
-        return c;
-      }));
+        return [
+          ...prev,
+          {
+            id: `new-${rowIdx}-${colIdx}-${Date.now()}`,
+            document_id: id || '',
+            page_number: currentPage,
+            row_index: rowIdx,
+            column_index: colIdx,
+            original_value: '',
+            current_value: newValue,
+            confidence: 1.0,
+            is_inferred: false,
+            bbox,
+            version: 1,
+          },
+        ];
+      });
     } catch (err) {
       console.error('Failed to save cell correction:', err);
     } finally {
@@ -839,6 +875,10 @@ export const VerificationPage: React.FC = () => {
               onGridReady={onGridReady}
               onCellClicked={onCellClicked}
               onCellValueChanged={handleCellValueChanged}
+              singleClickEdit={true}
+              stopEditingWhenCellsLoseFocus={true}
+              enterNavigatesVertically={true}
+              enterNavigatesVerticallyAfterEdit={true}
               enableCellTextSelection={true}
               suppressCellFocus={false}
               pagination={true}
