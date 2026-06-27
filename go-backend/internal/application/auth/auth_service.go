@@ -30,6 +30,10 @@ type LoginResponse struct {
 	User         domain.User `json:"user"`
 }
 
+type RefreshRequest struct {
+	RefreshToken string `json:"refresh_token"`
+}
+
 type AuthService struct {
 	tenantRepo domain.TenantRepository
 	userRepo   domain.UserRepository
@@ -129,6 +133,62 @@ func (s *AuthService) Login(ctx context.Context, req LoginRequest) (*LoginRespon
 	return &LoginResponse{
 		Token:        token,
 		RefreshToken: refreshToken,
+		User:         *user,
+	}, nil
+}
+
+// Refresh exchanges a valid, non-expired refresh token for a fresh access
+// token (and a rotated refresh token). It re-reads the user's current status,
+// roles and permissions so that a revoked/suspended account or changed
+// permissions take effect on the next refresh rather than living on for the
+// full refresh-token lifetime.
+func (s *AuthService) Refresh(ctx context.Context, refreshToken string) (*LoginResponse, error) {
+	claims, err := crypto.ParseToken(refreshToken, s.jwtSecret)
+	if err != nil {
+		return nil, errors.New("invalid or expired refresh token")
+	}
+
+	// Guard against an access token being replayed here: refresh tokens are
+	// minted with the sentinel "refresh" role.
+	isRefresh := false
+	for _, r := range claims.Roles {
+		if r == "refresh" {
+			isRefresh = true
+			break
+		}
+	}
+	if !isRefresh {
+		return nil, errors.New("not a refresh token")
+	}
+
+	user, err := s.userRepo.GetByID(ctx, claims.UserID)
+	if err != nil || user == nil {
+		return nil, errors.New("user not found")
+	}
+	if user.Status != "active" {
+		return nil, errors.New("user account is inactive")
+	}
+
+	roles, perms, err := s.userRepo.GetUserRolesAndPermissions(ctx, user.ID)
+	if err != nil {
+		return nil, err
+	}
+	user.Roles = roles
+	user.Permissions = perms
+
+	token, err := crypto.GenerateToken(user.ID, user.TenantID, roles, s.jwtSecret, 24*time.Hour)
+	if err != nil {
+		return nil, err
+	}
+
+	newRefreshToken, err := crypto.GenerateToken(user.ID, user.TenantID, []string{"refresh"}, s.jwtSecret, 7*24*time.Hour)
+	if err != nil {
+		return nil, err
+	}
+
+	return &LoginResponse{
+		Token:        token,
+		RefreshToken: newRefreshToken,
 		User:         *user,
 	}, nil
 }

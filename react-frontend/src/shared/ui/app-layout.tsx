@@ -41,7 +41,7 @@ export function AppLayout() {
       .get()
       .then(setUser)
       .catch(() => {
-        /* 401s are handled by the api client (clears token) */
+        /* 401s are handled by the api client (refresh, then logout on failure) */
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

@@ -49,6 +49,7 @@ func SetupRouter(cfg RouterConfig) *gin.Engine {
 		{
 			auth.POST("/register", cfg.AuthHandler.Register)
 			auth.POST("/login", cfg.AuthHandler.Login)
+			auth.POST("/refresh", cfg.AuthHandler.Refresh)
 		}
 	}
 

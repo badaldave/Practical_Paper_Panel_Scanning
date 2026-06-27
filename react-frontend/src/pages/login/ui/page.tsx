@@ -30,6 +30,9 @@ export const LoginPage: React.FC = () => {
 
       const data = await res.json();
       localStorage.setItem('auth_token', data.token);
+      if (data.refresh_token) {
+        localStorage.setItem('refresh_token', data.refresh_token);
+      }
       localStorage.setItem('auth_user', JSON.stringify(data.user));
 
       // Land on the best page for this user's permissions
