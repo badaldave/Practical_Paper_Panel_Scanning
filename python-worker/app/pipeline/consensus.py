@@ -21,7 +21,7 @@ INFERRED_CONFIDENCE = 0.95
 # How many cross-document votes a single examiner can contribute to the name
 # medoid. Caps the directory so it informs the result without overpowering the
 # rows physically on the page being processed.
-DB_VOTE_CAP = 3
+DB_VOTE_CAP = 6
 
 
 def _nname(s):
