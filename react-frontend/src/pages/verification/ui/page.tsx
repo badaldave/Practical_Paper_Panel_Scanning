@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom';
 import { AgGridReact } from 'ag-grid-react';
 import { ColDef, GridApi, GridReadyEvent, CellClickedEvent } from 'ag-grid-community';
-import { AlertCircle, Download, CheckCircle, ArrowLeft, Loader2, Lock, Unlock, Check } from 'lucide-react';
+import { AlertCircle, Download, CheckCircle, ArrowLeft, Loader2, Lock, Unlock, Check, Keyboard } from 'lucide-react';
 
 import 'ag-grid-community/styles/ag-grid.css';
 import 'ag-grid-community/styles/ag-theme-quartz.css';
@@ -51,6 +51,13 @@ interface DocumentDetails {
     total_candidates?: number;
   }>;
 }
+
+// Small keycap chip used in the shortcuts legend.
+const Kbd: React.FC<{ children: React.ReactNode }> = ({ children }) => (
+  <kbd className="px-1.5 py-0.5 bg-slate-800 border border-slate-700 rounded text-[10px] font-mono font-semibold text-slate-200 leading-none">
+    {children}
+  </kbd>
+);
 
 export const VerificationPage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
@@ -239,6 +246,48 @@ export const VerificationPage: React.FC = () => {
     if (!id || !lockedByMe || isSubmitted) return;
     verificationApi.presence(id, currentPage).catch(() => {});
   }, [id, currentPage, lockedByMe, isSubmitted]);
+
+  // Keyboard shortcuts so verifiers can work mouse-free:
+  //   Alt+→ / Alt+←  next / previous page
+  //   Alt+V          toggle the current page as verified
+  //   Alt+Enter      submit the document (once every page is verified)
+  // Alt-modified keys don't clash with AG Grid cell editing/navigation, so they
+  // work even while a cell editor is focused.
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (!e.altKey) return;
+      const pages = docDetails?.pages?.length || 1;
+      switch (e.key) {
+        case 'ArrowRight':
+          e.preventDefault();
+          setCurrentPage((prev) => Math.min(prev + 1, pages));
+          break;
+        case 'ArrowLeft':
+          e.preventDefault();
+          setCurrentPage((prev) => Math.max(prev - 1, 1));
+          break;
+        case 'v':
+        case 'V':
+          if (editable) {
+            e.preventDefault();
+            toggleCurrentPage();
+          }
+          break;
+        case 'Enter':
+          if (
+            editable &&
+            (vState?.total_pages || 0) > 0 &&
+            verifiedPageSet.size >= (vState?.total_pages || pages)
+          ) {
+            e.preventDefault();
+            submitDoc();
+          }
+          break;
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [docDetails, editable, toggleCurrentPage, submitDoc, vState, verifiedPageSet]);
 
   // Pivot flat cell list into 2D row structures for AG Grid
   const gridData = useMemo(() => {
@@ -650,6 +699,7 @@ export const VerificationPage: React.FC = () => {
           <button
             onClick={() => setCurrentPage(prev => Math.max(prev - 1, 1))}
             disabled={currentPage === 1}
+            title="Previous page (Alt+←)"
             className="px-2 py-1 bg-slate-800 hover:bg-slate-700 disabled:bg-slate-900 disabled:text-slate-600 text-xs font-semibold rounded transition-all cursor-pointer disabled:cursor-not-allowed"
           >
             Prev
@@ -660,6 +710,7 @@ export const VerificationPage: React.FC = () => {
           <button
             onClick={() => setCurrentPage(prev => Math.min(prev + 1, totalPages))}
             disabled={currentPage === totalPages}
+            title="Next page (Alt+→)"
             className="px-2 py-1 bg-slate-800 hover:bg-slate-700 disabled:bg-slate-900 disabled:text-slate-600 text-xs font-semibold rounded transition-all cursor-pointer disabled:cursor-not-allowed"
           >
             Next
@@ -700,7 +751,7 @@ export const VerificationPage: React.FC = () => {
               <button
                 onClick={submitDoc}
                 disabled={vBusy || !((vState?.total_pages || 0) > 0 && verifiedPageSet.size >= (vState?.total_pages || totalPages))}
-                title={verifiedPageSet.size < (vState?.total_pages || totalPages) ? 'Mark every page verified before submitting' : 'Submit verified document'}
+                title={verifiedPageSet.size < (vState?.total_pages || totalPages) ? 'Mark every page verified before submitting' : 'Submit verified document (Alt+Enter)'}
                 className="flex items-center gap-2 px-4 py-1.5 bg-emerald-600 hover:bg-emerald-500 disabled:bg-emerald-900 disabled:text-emerald-600/60 rounded-lg text-xs font-semibold text-white transition shadow-lg shadow-emerald-600/20 cursor-pointer disabled:cursor-not-allowed disabled:shadow-none"
               >
                 <CheckCircle className="w-3.5 h-3.5" /> Submit
@@ -861,13 +912,29 @@ export const VerificationPage: React.FC = () => {
                   ? 'bg-emerald-950 border border-emerald-900 text-emerald-400'
                   : 'bg-slate-800 border border-slate-700 text-slate-300 hover:text-white disabled:opacity-50'
               }`}
-              title={editable ? 'Toggle this page as verified' : 'Claim the file to mark pages verified'}
+              title={editable ? 'Toggle this page as verified (Alt+V)' : 'Claim the file to mark pages verified'}
             >
               <Check className="w-3.5 h-3.5" />
               {currentPageVerified ? `Page ${currentPage} verified` : `Mark page ${currentPage} verified`}
             </button>
           </div>
           
+          {/* Keyboard shortcuts legend — keeps verification mouse-free */}
+          <div className="px-4 py-2 border-b border-slate-800 bg-slate-950/40 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-[10px] text-slate-400">
+            <span className="flex items-center gap-1.5 font-semibold text-slate-300">
+              <Keyboard className="w-3.5 h-3.5" /> Shortcuts
+            </span>
+            <span className="flex items-center gap-1"><Kbd>Enter</Kbd> next row</span>
+            <span className="flex items-center gap-1"><Kbd>Tab</Kbd> next cell</span>
+            <span className="flex items-center gap-1"><Kbd>Alt</Kbd>+<Kbd>←</Kbd>/<Kbd>→</Kbd> change page</span>
+            {editable && (
+              <>
+                <span className="flex items-center gap-1"><Kbd>Alt</Kbd>+<Kbd>V</Kbd> mark page verified</span>
+                <span className="flex items-center gap-1"><Kbd>Alt</Kbd>+<Kbd>Enter</Kbd> submit</span>
+              </>
+            )}
+          </div>
+
           <div className="flex-1 w-full ag-theme-quartz-dark">
             <AgGridReact
               rowData={gridData}
