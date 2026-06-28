@@ -81,6 +81,35 @@ func (h *ExtractionHandler) LookupExaminer(c *gin.Context) {
 	c.JSON(http.StatusOK, match)
 }
 
+// DeleteRow removes a row from a document page and shifts rows below it up.
+func (h *ExtractionHandler) DeleteRow(c *gin.Context) {
+	docID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid document ID format"})
+		return
+	}
+	page, err := strconv.Atoi(c.Param("page"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid page number"})
+		return
+	}
+	row, err := strconv.Atoi(c.Param("row"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid row index"})
+		return
+	}
+	userIDVal, exists := c.Get("user_id")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		return
+	}
+	if err := h.extService.DeleteRow(c.Request.Context(), docID, page, row, userIDVal.(uuid.UUID)); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "success", "message": "Row deleted"})
+}
+
 func (h *ExtractionHandler) GetCellHistory(c *gin.Context) {
 	docIDStr := c.Param("id")
 	docID, err := uuid.Parse(docIDStr)

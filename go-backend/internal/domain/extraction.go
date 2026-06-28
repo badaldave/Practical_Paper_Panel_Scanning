@@ -98,4 +98,8 @@ type ExtractionRepository interface {
 	// name for the current tenant: the most recent human-verified correction wins
 	// over the seeded registry. Returns a match with empty Name when unknown.
 	LookupExaminerByMobile(ctx context.Context, mobile string) (*ExaminerMatch, error)
+
+	// DeleteRow removes all cells at (page, row) for the document and shifts every
+	// row below it up by one so the grid has no gap.
+	DeleteRow(ctx context.Context, docID uuid.UUID, page, row int) error
 }

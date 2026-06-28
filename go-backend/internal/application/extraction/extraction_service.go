@@ -172,3 +172,21 @@ func (s *ExtractionService) GetHistory(ctx context.Context, docID uuid.UUID, pag
 func (s *ExtractionService) LookupExaminer(ctx context.Context, mobile string) (*domain.ExaminerMatch, error) {
 	return s.extRepo.LookupExaminerByMobile(ctx, mobile)
 }
+
+// DeleteRow removes a row from a document's page and shifts rows below it up.
+func (s *ExtractionService) DeleteRow(ctx context.Context, docID uuid.UUID, page, row int, userID uuid.UUID) error {
+	if err := s.extRepo.DeleteRow(ctx, docID, page, row); err != nil {
+		return err
+	}
+	if doc, err := s.docRepo.GetByID(ctx, docID); err == nil && doc != nil {
+		_ = s.auditRepo.Log(ctx, &domain.AuditLog{
+			TenantID:   doc.TenantID,
+			UserID:     &userID,
+			EntityType: "document",
+			EntityID:   docID,
+			Action:     "row_deleted",
+			NewValue:   map[string]interface{}{"page": page, "row": row},
+		})
+	}
+	return nil
+}

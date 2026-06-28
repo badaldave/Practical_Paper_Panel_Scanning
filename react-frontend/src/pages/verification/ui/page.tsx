@@ -72,20 +72,27 @@ const RowMoveRenderer: React.FC<any> = (params) => {
     <div className="flex items-center gap-1.5">
       <span className="text-slate-400 tabular-nums">{r}</span>
       {editable && (
-        <span className="flex flex-col leading-none">
+        <>
+          <span className="flex flex-col leading-none">
+            <button
+              disabled={pos <= 0}
+              onClick={() => ctx.moveRowRef?.current?.(r, r - 1)}
+              title="Move row up"
+              className="text-[9px] text-slate-500 hover:text-white disabled:opacity-20 cursor-pointer disabled:cursor-default"
+            >▲</button>
+            <button
+              disabled={pos >= last}
+              onClick={() => ctx.moveRowRef?.current?.(r, r + 1)}
+              title="Move row down"
+              className="text-[9px] text-slate-500 hover:text-white disabled:opacity-20 cursor-pointer disabled:cursor-default"
+            >▼</button>
+          </span>
           <button
-            disabled={pos <= 0}
-            onClick={() => ctx.moveRowRef?.current?.(r, r - 1)}
-            title="Move row up"
-            className="text-[9px] text-slate-500 hover:text-white disabled:opacity-20 cursor-pointer disabled:cursor-default"
-          >▲</button>
-          <button
-            disabled={pos >= last}
-            onClick={() => ctx.moveRowRef?.current?.(r, r + 1)}
-            title="Move row down"
-            className="text-[9px] text-slate-500 hover:text-white disabled:opacity-20 cursor-pointer disabled:cursor-default"
-          >▼</button>
-        </span>
+            onClick={() => ctx.deleteRowRef?.current?.(r)}
+            title="Delete row"
+            className="text-[12px] leading-none text-slate-500 hover:text-red-400 cursor-pointer"
+          >✕</button>
+        </>
       )}
     </div>
   );
@@ -404,7 +411,7 @@ export const VerificationPage: React.FC = () => {
       {
         headerName: 'Row #',
         field: 'rowIndex',
-        width: 96,
+        width: 112,
         pinned: 'left',
         editable: false,
         cellRenderer: RowMoveRenderer,
@@ -689,7 +696,7 @@ export const VerificationPage: React.FC = () => {
     const colField = event.colDef.field || '';
     const colIdx = parseInt(colField.replace('col_', ''));
     const rowIdx = event.data.rowIndex;
-    const newValue = event.newValue ?? '';
+    const newValue = String(event.newValue ?? '');
 
     if (colIdx === BATCH_COL) manualBatchRef.current.add(`${currentPage}:${rowIdx}`);
     const editedBBox = bboxAt(cellsRef.current, currentPage, rowIdx, colIdx);
@@ -816,10 +823,40 @@ export const VerificationPage: React.FC = () => {
     }
   };
 
-  // Refs so the grid's Row# renderer can call the latest moveRow / editable
-  // without rebuilding the column definitions on every render.
+  // Delete a row: remove its cells on the server (which shifts rows below up),
+  // mirror that locally, then renumber Batch by the new positions.
+  const deleteRow = async (row: number) => {
+    if (!id) return;
+    if (!window.confirm('Delete this row? Rows below it shift up.')) return;
+    try {
+      setIsSaving(true);
+      await apiClient(`/api/documents/${id}/rows/${currentPage}/${row}`, { method: 'DELETE' });
+      let working = cellsRef.current
+        .filter(c => !(c.page_number === currentPage && c.row_index === row))
+        .map(c => (c.page_number === currentPage && c.row_index > row) ? { ...c, row_index: c.row_index - 1 } : c);
+      // Positions changed — drop this page's manual-batch markers and renumber.
+      [...manualBatchRef.current].forEach(k => { if (k.startsWith(`${currentPage}:`)) manualBatchRef.current.delete(k); });
+      const batchWrites = computeAutoWrites(working, currentPage).filter(w => w.col === BATCH_COL);
+      if (batchWrites.length) {
+        await Promise.all(batchWrites.map(w => persistRemote(currentPage, w.row, w.col, w.value, bboxAt(working, currentPage, w.row, w.col), { auto: true })));
+        batchWrites.forEach(w => { working = upsertLocal(working, currentPage, w.row, w.col, w.value, { bbox: bboxAt(working, currentPage, w.row, w.col) }); });
+      }
+      cellsRef.current = working;
+      setCells(working);
+      setSelectedCell(null);
+    } catch (e) {
+      console.error('Row delete failed:', e);
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  // Refs so the grid's Row# renderer can call the latest moveRow / deleteRow /
+  // editable without rebuilding the column definitions on every render.
   const moveRowRef = useRef(moveRow);
   moveRowRef.current = moveRow;
+  const deleteRowRef = useRef(deleteRow);
+  deleteRowRef.current = deleteRow;
   const editableRef = useRef(editable);
   editableRef.current = editable;
 
@@ -1204,7 +1241,7 @@ export const VerificationPage: React.FC = () => {
               rowData={gridData}
               columnDefs={columnDefs}
               getRowId={(p) => String(p.data.rowIndex)}
-              context={{ moveRowRef, editableRef }}
+              context={{ moveRowRef, editableRef, deleteRowRef }}
               onGridReady={onGridReady}
               onCellClicked={onCellClicked}
               onCellValueChanged={handleCellValueChanged}

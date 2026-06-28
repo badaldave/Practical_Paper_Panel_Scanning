@@ -517,6 +517,48 @@ func (r *ExtractionRepository) LookupExaminerByMobile(ctx context.Context, mobil
 	return &domain.ExaminerMatch{Mobile: key, Name: regName, Source: "registry"}, nil
 }
 
+// DeleteRow removes every cell at (page, row) for the document, then shifts all
+// rows below it up by one (no gap). Runs in a transaction; history rows are kept
+// consistent on a best-effort basis. Tenant-scoped.
+func (r *ExtractionRepository) DeleteRow(ctx context.Context, docID uuid.UUID, page, row int) error {
+	tenantID, err := contextutil.GetTenantID(ctx)
+	if err == nil {
+		var exists bool
+		if e := r.db.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM documents WHERE id = $1 AND tenant_id = $2)", docID, tenantID).Scan(&exists); e != nil || !exists {
+			return errors.New("document not found or tenant mismatch")
+		}
+	}
+
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM extracted_cells WHERE document_id = $1 AND page_number = $2 AND row_index = $3`,
+		docID, page, row); err != nil {
+		return fmt.Errorf("failed to delete row cells: %w", err)
+	}
+	// Shift rows below up by one. uq_cell_coordinate is non-deferrable, so a direct
+	// `row_index - 1` bulk update can trip a transient duplicate during the scan.
+	// Park the rows at a high offset first, then bring them back shifted by one —
+	// neither target range overlaps an existing row, so no collision.
+	const offset = 1000000
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE extracted_cells SET row_index = row_index + $4 WHERE document_id = $1 AND page_number = $2 AND row_index > $3`,
+		docID, page, row, offset); err != nil {
+		return fmt.Errorf("failed to park rows: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE extracted_cells SET row_index = row_index - $3 WHERE document_id = $1 AND page_number = $2 AND row_index > $4`,
+		docID, page, offset+1, offset-1); err != nil {
+		return fmt.Errorf("failed to shift rows up: %w", err)
+	}
+
+	return tx.Commit()
+}
+
 // onlyDigitsStr strips everything but ASCII digits.
 func onlyDigitsStr(s string) string {
 	var b strings.Builder

@@ -76,6 +76,7 @@ func SetupRouter(cfg RouterConfig) *gin.Engine {
 			docs.GET("/:id/cells", perm("documents.view"), cfg.ExtractionHandler.GetActiveCells)
 			docs.PUT("/:id/cells", perm("verification.perform"), cfg.ExtractionHandler.UpdateCell)
 			docs.GET("/:id/cells/:row/:col/history", perm("documents.view"), cfg.ExtractionHandler.GetCellHistory)
+			docs.DELETE("/:id/rows/:page/:row", perm("verification.perform"), cfg.ExtractionHandler.DeleteRow)
 			docs.PUT("/:id/pages/:page_number", perm("verification.perform"), cfg.DocumentHandler.UpdatePageMetadata)
 
 			// Export downloads
