@@ -66,6 +66,21 @@ func (h *ExtractionHandler) UpdateCell(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "success", "message": "Cell updated successfully"})
 }
 
+// LookupExaminer resolves ?mobile= to the best-known examiner name for the tenant.
+func (h *ExtractionHandler) LookupExaminer(c *gin.Context) {
+	mobile := c.Query("mobile")
+	if mobile == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "mobile query parameter required"})
+		return
+	}
+	match, err := h.extService.LookupExaminer(c.Request.Context(), mobile)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, match)
+}
+
 func (h *ExtractionHandler) GetCellHistory(c *gin.Context) {
 	docIDStr := c.Param("id")
 	docID, err := uuid.Parse(docIDStr)

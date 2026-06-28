@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { AgGridReact } from 'ag-grid-react';
-import { ColDef, GridApi, GridReadyEvent, CellClickedEvent } from 'ag-grid-community';
+import { ColDef, GridApi, GridReadyEvent, CellClickedEvent, CellStyle } from 'ag-grid-community';
 import { AlertCircle, Download, CheckCircle, ArrowLeft, Loader2, Lock, Unlock, Check, Keyboard } from 'lucide-react';
 
 import 'ag-grid-community/styles/ag-grid.css';
@@ -9,7 +9,7 @@ import 'ag-grid-community/styles/ag-theme-quartz.css';
 
 import { apiClient } from '@/shared/api/client';
 import { CanvasViewer, CanvasCell } from '@/shared/ui/canvas-viewer';
-import { verificationApi, settingsApi, type DocumentState } from '@/shared/api/services';
+import { verificationApi, settingsApi, examinersApi, type DocumentState } from '@/shared/api/services';
 import { useAuthStore } from '@/entities/user/model/store';
 
 interface CellRecord {
@@ -59,11 +59,62 @@ const Kbd: React.FC<{ children: React.ReactNode }> = ({ children }) => (
   </kbd>
 );
 
+// Row# cell: shows the row number plus ▲/▼ controls to move a row up/down
+// (#10, Excel-like reorder). Reads moveRow/editable from the grid context so the
+// column definitions stay stable across renders.
+const RowMoveRenderer: React.FC<any> = (params) => {
+  const r: number = params.data?.rowIndex ?? 0;
+  const ctx = params.context || {};
+  const editable = !!ctx.editableRef?.current;
+  const pos: number = params.node?.rowIndex ?? r;
+  const last = (params.api?.getDisplayedRowCount?.() ?? 1) - 1;
+  return (
+    <div className="flex items-center gap-1.5">
+      <span className="text-slate-400 tabular-nums">{r}</span>
+      {editable && (
+        <span className="flex flex-col leading-none">
+          <button
+            disabled={pos <= 0}
+            onClick={() => ctx.moveRowRef?.current?.(r, r - 1)}
+            title="Move row up"
+            className="text-[9px] text-slate-500 hover:text-white disabled:opacity-20 cursor-pointer disabled:cursor-default"
+          >▲</button>
+          <button
+            disabled={pos >= last}
+            onClick={() => ctx.moveRowRef?.current?.(r, r + 1)}
+            title="Move row down"
+            className="text-[9px] text-slate-500 hover:text-white disabled:opacity-20 cursor-pointer disabled:cursor-default"
+          >▼</button>
+        </span>
+      )}
+    </div>
+  );
+};
+
+// Stored column_index -> meaning for this fixed marksheet format.
+const SUBJECT_CODE_COL = 0;
+const BATCH_COL = 1;
+const NAME_COL = 2;
+const MOBILE_COL = 3;
+const SUBJECT_ID_COL = 4;
+
+const onlyDigits = (s: string) => (s || '').replace(/\D/g, '');
+const nameLetters = (s: string) => (s || '').replace(/[^A-Za-z]/g, '');
+// Batch sequence down a sheet: first examiner row = "1", then R1, R2, R3, …
+const batchLabelFor = (pos: number) => (pos === 0 ? '1' : `R${pos}`);
+// A row "has data" once it carries a real name or mobile — auto Batch/Subject
+// only attach to these, never to the blank trailing entry rows.
+const rowHasData = (name: string, mobile: string) =>
+  nameLetters(name).length >= 1 || onlyDigits(mobile).length >= 1;
+
 export const VerificationPage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const [docDetails, setDocDetails] = useState<DocumentDetails | null>(null);
   const [cells, setCells] = useState<CellRecord[]>([]);
+  // Always-current mirror of `cells` so the autosave/auto-fill handlers read the
+  // latest data even when edits interleave (rapid Tab entry) before React commits.
+  const cellsRef = useRef<CellRecord[]>([]);
   const [selectedCell, setSelectedCell] = useState<{ row: number; col: number } | null>(null);
   const [isSaving, setIsSaving] = useState<boolean>(false);
   const [loading, setLoading] = useState<boolean>(true);
@@ -78,6 +129,10 @@ export const VerificationPage: React.FC = () => {
   });
   const [isSavingMetadata, setIsSavingMetadata] = useState<boolean>(false);
   const gridApiRef = useRef<GridApi | null>(null);
+  // Rows whose Batch the user edited by hand (keyed `page:row`) — auto Batch
+  // numbering must not overwrite these. Pages already auto-synced once on open.
+  const manualBatchRef = useRef<Set<string>>(new Set());
+  const autoSyncedPagesRef = useRef<Set<number>>(new Set());
 
   // --- Verification lock & per-page progress ---
   const myUserId = useAuthStore((s) => s.user?.id);
@@ -236,6 +291,9 @@ export const VerificationPage: React.FC = () => {
     return () => clearInterval(interval);
   }, [id, docDetails]);
 
+  // Keep the cells mirror in sync after every committed change.
+  useEffect(() => { cellsRef.current = cells; }, [cells]);
+
   // Load verification lock/progress state on open.
   useEffect(() => {
     refreshVState();
@@ -346,11 +404,21 @@ export const VerificationPage: React.FC = () => {
       {
         headerName: 'Row #',
         field: 'rowIndex',
-        width: 80,
+        width: 96,
         pinned: 'left',
         editable: false,
+        cellRenderer: RowMoveRenderer,
       }
     ];
+
+    // Sensible per-column widths instead of an equal default. Examiner Name flexes
+    // to fill remaining space; the others size to their content.
+    const colWidths: Record<number, number> = {
+      [SUBJECT_ID_COL]: 120,
+      [SUBJECT_CODE_COL]: 130,
+      [BATCH_COL]: 85,
+      [MOBILE_COL]: 150,
+    };
 
     // Display order: Subject ID (col 4), Subject Code (col 0), Batch (1),
     // Examiner Name (2), Mobile Number (3), then any extra columns. Subject ID and
@@ -371,6 +439,10 @@ export const VerificationPage: React.FC = () => {
         headerName: colName,
         field: `col_${c}`,
         editable: editable,
+        resizable: true,
+        ...(c === NAME_COL
+          ? { flex: 2, minWidth: 200 }
+          : { width: colWidths[c] ?? 140 }),
         // Custom value getter/setter to read cell nested details
         valueGetter: (params) => {
           if (!params.data) return '';
@@ -385,10 +457,21 @@ export const VerificationPage: React.FC = () => {
           return true;
         },
         // Styling based on OCR confidence ranges
-        cellStyle: (params) => {
+        cellStyle: (params): CellStyle | null => {
           if (!params.data) return null;
           const cellObj = params.data[`col_${c}`];
           if (!cellObj) return null;
+
+          // A mobile number must be exactly 10 digits. Anything else that's been
+          // filled in (too short OR too long, e.g. 11) is almost certainly wrong —
+          // flag it solid dark red so the verifier spots it instantly. This wins
+          // over confidence/inferred styling for the mobile column.
+          if (c === MOBILE_COL) {
+            const d = onlyDigits(cellObj.value);
+            if (d.length > 0 && d.length !== 10) {
+              return { backgroundColor: '#7f1d1d', color: '#ffffff', borderLeft: '3px solid #ef4444' };
+            }
+          }
 
           // Inferred (auto-filled from a matching mobile) takes precedence: flag it
           // distinctly so a reviewer knows the value was voted, not read.
@@ -477,7 +560,7 @@ export const VerificationPage: React.FC = () => {
   };
 
   const handleSaveMetadata = async () => {
-    if (!id) return;
+    if (!id || !editable) return;
     try {
       setIsSavingMetadata(true);
       await apiClient(`/api/documents/${id}/pages/${currentPage}`, {
@@ -519,64 +602,231 @@ export const VerificationPage: React.FC = () => {
     }
   };
 
-  // Save changes
+  // ---- cell helpers used by the editing + auto-fill logic ----
+  const ZERO_BBOX = { x: 0, y: 0, width: 0, height: 0 };
+  const cellAt = (list: CellRecord[], page: number, row: number, col: number) =>
+    list.find(c => c.page_number === page && c.row_index === row && c.column_index === col);
+  const valAt = (list: CellRecord[], page: number, row: number, col: number) =>
+    cellAt(list, page, row, col)?.current_value ?? '';
+  const bboxAt = (list: CellRecord[], page: number, row: number, col: number) =>
+    cellAt(list, page, row, col)?.bbox ?? ZERO_BBOX;
+
+  // Sorted indices of rows on a page that carry real examiner content.
+  const dataRowsOf = (list: CellRecord[], page: number) => {
+    const rows = new Set<number>();
+    list.forEach(c => { if (c.page_number === page) rows.add(c.row_index); });
+    return [...rows]
+      .filter(r => rowHasData(valAt(list, page, r, NAME_COL), valAt(list, page, r, MOBILE_COL)))
+      .sort((a, b) => a - b);
+  };
+
+  // Immutable upsert of a single cell into a cells array.
+  const upsertLocal = (
+    list: CellRecord[], page: number, row: number, col: number, value: string,
+    opts?: { isInferred?: boolean; confidence?: number; bbox?: CellRecord['bbox'] },
+  ): CellRecord[] => {
+    const idx = list.findIndex(c => c.page_number === page && c.row_index === row && c.column_index === col);
+    const confidence = opts?.confidence ?? 1.0;
+    const isInferred = opts?.isInferred ?? false;
+    if (idx >= 0) {
+      const next = [...list];
+      next[idx] = { ...next[idx], current_value: value, confidence, is_inferred: isInferred, ...(opts?.bbox ? { bbox: opts.bbox } : {}) };
+      return next;
+    }
+    return [...list, {
+      id: `new-${page}-${row}-${col}-${Date.now()}-${Math.round(Math.random() * 1e6)}`,
+      document_id: id || '', page_number: page, row_index: row, column_index: col,
+      original_value: '', current_value: value, confidence, is_inferred: isInferred,
+      bbox: opts?.bbox || { ...ZERO_BBOX }, version: 1,
+    }];
+  };
+
+  // Persist a single cell to the backend. `auto` flags machine-derived fills so the
+  // server skips the correction-feedback loop.
+  const persistRemote = async (
+    page: number, row: number, col: number, value: string, bbox: CellRecord['bbox'],
+    opts?: { isInferred?: boolean; confidence?: number; auto?: boolean },
+  ) => {
+    await apiClient(`/api/documents/${id}/cells`, {
+      method: 'PUT',
+      json: {
+        page_number: page, row_index: row, column_index: col, value, bbox,
+        ...(opts?.isInferred != null ? { is_inferred: opts.isInferred } : {}),
+        ...(opts?.confidence != null ? { confidence: opts.confidence } : {}),
+        ...(opts?.auto ? { auto: true } : {}),
+      },
+    });
+  };
+
+  // #6 + #7: derive Batch and Subject values for data rows. Batch follows the
+  // positional sequence (1, R1, R2, …) unless the user edited it; Subject Code/ID
+  // fill from the first data row only when empty (first-row overwrite of all rows
+  // is handled in handleCellValueChanged).
+  type AutoWrite = { row: number; col: number; value: string };
+  const computeAutoWrites = (list: CellRecord[], page: number): AutoWrite[] => {
+    const dataRows = dataRowsOf(list, page);
+    if (!dataRows.length) return [];
+    const writes: AutoWrite[] = [];
+    dataRows.forEach((r, i) => {
+      const expectedBatch = batchLabelFor(i);
+      if (!manualBatchRef.current.has(`${page}:${r}`) && valAt(list, page, r, BATCH_COL) !== expectedBatch) {
+        writes.push({ row: r, col: BATCH_COL, value: expectedBatch });
+      }
+      [SUBJECT_CODE_COL, SUBJECT_ID_COL].forEach(col => {
+        const established = valAt(list, page, dataRows[0], col);
+        if (established && valAt(list, page, r, col).trim() === '') {
+          writes.push({ row: r, col, value: established });
+        }
+      });
+    });
+    return writes;
+  };
+
+  // Save edits and apply all derived fills (#5 lookup, #6 batch, #7 subject).
   const handleCellValueChanged = async (event: any) => {
     const colField = event.colDef.field || '';
     const colIdx = parseInt(colField.replace('col_', ''));
     const rowIdx = event.data.rowIndex;
-    const newValue = event.newValue;
+    const newValue = event.newValue ?? '';
 
-    const cellObj = cells.find(c => c.page_number === currentPage && c.row_index === rowIdx && c.column_index === colIdx);
-    // No backing cell yet (e.g. a pre-seeded blank row) — upsert a new one.
-    const bbox = cellObj?.bbox || { x: 0, y: 0, width: 0, height: 0 };
+    if (colIdx === BATCH_COL) manualBatchRef.current.add(`${currentPage}:${rowIdx}`);
+    const editedBBox = bboxAt(cellsRef.current, currentPage, rowIdx, colIdx);
+    let working = upsertLocal(cellsRef.current, currentPage, rowIdx, colIdx, newValue, { bbox: editedBBox });
 
     try {
       setIsSaving(true);
-      await apiClient(`/api/documents/${id}/cells`, {
-        method: 'PUT',
-        json: {
-          page_number: currentPage,
-          row_index: rowIdx,
-          column_index: colIdx,
-          value: newValue,
-          bbox
-        }
-      });
+      await persistRemote(currentPage, rowIdx, colIdx, newValue, editedBBox);
 
-      // Update local cells state (boost edited cell confidence to 100%), or add
-      // the cell if it didn't exist yet so the grid/canvas stay in sync.
-      setCells(prev => {
-        if (cellObj) {
-          return prev.map(c => {
-            if (c.page_number === currentPage && c.row_index === rowIdx && c.column_index === colIdx) {
-              return { ...c, current_value: newValue, confidence: 1.0, is_inferred: false };
-            }
-            return c;
-          });
+      // Collect derived writes; later rules keep priority over auto-fill.
+      const writeMap = new Map<string, { row: number; col: number; value: string; isInferred?: boolean; confidence?: number }>();
+      const put = (w: { row: number; col: number; value: string; isInferred?: boolean; confidence?: number }) =>
+        writeMap.set(`${w.row}:${w.col}`, w);
+
+      // #7 — first data row's Subject Code/ID overwrites every data row.
+      if (colIdx === SUBJECT_CODE_COL || colIdx === SUBJECT_ID_COL) {
+        const dr = dataRowsOf(working, currentPage);
+        if (dr.length && rowIdx === dr[0]) {
+          dr.forEach(r => { if (r !== rowIdx && valAt(working, currentPage, r, colIdx) !== newValue) put({ row: r, col: colIdx, value: newValue }); });
         }
-        return [
-          ...prev,
-          {
-            id: `new-${rowIdx}-${colIdx}-${Date.now()}`,
-            document_id: id || '',
-            page_number: currentPage,
-            row_index: rowIdx,
-            column_index: colIdx,
-            original_value: '',
-            current_value: newValue,
-            confidence: 1.0,
-            is_inferred: false,
-            bbox,
-            version: 1,
-          },
-        ];
-      });
+      }
+
+      // #5 — a corrected 10-digit mobile fetches the examiner name from the DB.
+      // Only fills an empty/inferred name; never overwrites a human-typed one.
+      if (colIdx === MOBILE_COL) {
+        const digits = onlyDigits(newValue);
+        if (digits.length === 10) {
+          const nameVal = valAt(working, currentPage, rowIdx, NAME_COL);
+          const nameInferred = cellAt(working, currentPage, rowIdx, NAME_COL)?.is_inferred ?? false;
+          if (nameLetters(nameVal).length < 2 || nameInferred) {
+            try {
+              const res = await examinersApi.lookup(digits);
+              if (res?.name && !res.ambiguous) {
+                put({ row: rowIdx, col: NAME_COL, value: res.name, isInferred: true, confidence: 0.95 });
+              }
+            } catch { /* lookup is best-effort */ }
+          }
+        }
+      }
+
+      // #6 — auto Batch + fill empty Subject (without clobbering #5/#7 entries).
+      computeAutoWrites(working, currentPage).forEach(w => { if (!writeMap.has(`${w.row}:${w.col}`)) put(w); });
+
+      const writes = [...writeMap.values()];
+      if (writes.length) {
+        await Promise.all(writes.map(w =>
+          persistRemote(currentPage, w.row, w.col, w.value, bboxAt(working, currentPage, w.row, w.col),
+            { isInferred: w.isInferred, confidence: w.confidence, auto: true })));
+        writes.forEach(w => {
+          working = upsertLocal(working, currentPage, w.row, w.col, w.value,
+            { isInferred: w.isInferred, confidence: w.confidence, bbox: bboxAt(working, currentPage, w.row, w.col) });
+        });
+      }
+      cellsRef.current = working;
+      setCells(working);
     } catch (err) {
       console.error('Failed to save cell correction:', err);
     } finally {
       setIsSaving(false);
     }
   };
+
+  // Run the auto Batch/Subject fill once when a page is opened (so existing data
+  // rows get their sequence/subject even before the user touches anything).
+  const syncAutoFields = async (page: number) => {
+    let working = cellsRef.current;
+    const writes = computeAutoWrites(working, page);
+    if (!writes.length) return;
+    try {
+      setIsSaving(true);
+      await Promise.all(writes.map(w =>
+        persistRemote(page, w.row, w.col, w.value, bboxAt(working, page, w.row, w.col), { auto: true })));
+      writes.forEach(w => { working = upsertLocal(working, page, w.row, w.col, w.value, { bbox: bboxAt(working, page, w.row, w.col) }); });
+      cellsRef.current = working;
+      setCells(working);
+    } catch (e) {
+      console.error('Auto-field sync failed:', e);
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  // #10 — Excel-like row move: swap every content column (value + bbox + flags)
+  // between two rows, then renumber Batch by position. Used by the ▲/▼ controls.
+  const moveRow = async (rowA: number, rowB: number) => {
+    if (rowA === rowB || rowB < 0) return;
+    const pageCells = cellsRef.current.filter(c => c.page_number === currentPage);
+    if (!pageCells.length) return;
+    const maxCol = Math.max(SUBJECT_ID_COL, ...pageCells.map(c => c.column_index));
+    let working = cellsRef.current;
+    const swaps: { row: number; col: number; value: string; bbox: CellRecord['bbox']; isInferred: boolean; confidence: number }[] = [];
+    for (let col = 0; col <= maxCol; col++) {
+      if (col === BATCH_COL) continue; // Batch is positional — renumbered below.
+      const a = cellAt(working, currentPage, rowA, col);
+      const b = cellAt(working, currentPage, rowB, col);
+      const aVal = a?.current_value ?? '', bVal = b?.current_value ?? '';
+      if (aVal === '' && bVal === '') continue;
+      swaps.push({ row: rowA, col, value: bVal, bbox: b?.bbox ?? { ...ZERO_BBOX }, isInferred: b?.is_inferred ?? false, confidence: b?.confidence ?? 1.0 });
+      swaps.push({ row: rowB, col, value: aVal, bbox: a?.bbox ?? { ...ZERO_BBOX }, isInferred: a?.is_inferred ?? false, confidence: a?.confidence ?? 1.0 });
+    }
+    if (!swaps.length) return;
+    manualBatchRef.current.delete(`${currentPage}:${rowA}`);
+    manualBatchRef.current.delete(`${currentPage}:${rowB}`);
+    try {
+      setIsSaving(true);
+      await Promise.all(swaps.map(s => persistRemote(currentPage, s.row, s.col, s.value, s.bbox, { isInferred: s.isInferred, confidence: s.confidence, auto: true })));
+      swaps.forEach(s => { working = upsertLocal(working, currentPage, s.row, s.col, s.value, { isInferred: s.isInferred, confidence: s.confidence, bbox: s.bbox }); });
+      const batchWrites = computeAutoWrites(working, currentPage).filter(w => w.col === BATCH_COL);
+      if (batchWrites.length) {
+        await Promise.all(batchWrites.map(w => persistRemote(currentPage, w.row, w.col, w.value, bboxAt(working, currentPage, w.row, w.col), { auto: true })));
+        batchWrites.forEach(w => { working = upsertLocal(working, currentPage, w.row, w.col, w.value, { bbox: bboxAt(working, currentPage, w.row, w.col) }); });
+      }
+      cellsRef.current = working;
+      setCells(working);
+    } catch (e) {
+      console.error('Row move failed:', e);
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  // Refs so the grid's Row# renderer can call the latest moveRow / editable
+  // without rebuilding the column definitions on every render.
+  const moveRowRef = useRef(moveRow);
+  moveRowRef.current = moveRow;
+  const editableRef = useRef(editable);
+  editableRef.current = editable;
+
+  // #6/#7 fire on load: auto-fill Batch/Subject for the page's data rows once,
+  // when its cells are present and the file is editable.
+  useEffect(() => {
+    if (!editable) return;
+    const pageCells = cells.filter(c => c.page_number === currentPage);
+    if (!pageCells.length) return;
+    if (autoSyncedPagesRef.current.has(currentPage)) return;
+    autoSyncedPagesRef.current.add(currentPage);
+    syncAutoFields(currentPage);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editable, currentPage, cells]);
 
   const handleDownload = (format: 'csv' | 'excel') => {
     if (!id) return;
@@ -810,7 +1060,14 @@ export const VerificationPage: React.FC = () => {
         <div className="w-1/2 h-full flex flex-col bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-2xl">
           {/* Metadata Form Section */}
           <div className="p-4 border-b border-slate-800 bg-slate-950/40">
-            <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3">Marksheet Header Information</h3>
+            <div className="flex items-center gap-2 mb-3">
+              <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Marksheet Header Information</h3>
+              {isSavingMetadata && (
+                <span className="flex items-center gap-1 text-[10px] text-blue-400 font-semibold">
+                  <Loader2 className="w-3 h-3 animate-spin" /> Saving…
+                </span>
+              )}
+            </div>
             <div className="grid grid-cols-2 gap-3 mb-3">
               <div>
                 <label className="block text-[10px] font-semibold text-slate-500 mb-1">College Code</label>
@@ -818,6 +1075,7 @@ export const VerificationPage: React.FC = () => {
                   type="text"
                   value={pageMetadata.college_code}
                   onChange={(e) => setPageMetadata(prev => ({ ...prev, college_code: e.target.value }))}
+                  onBlur={handleSaveMetadata}
                   className="w-full bg-slate-900 border border-slate-800 rounded px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-blue-500 transition"
                   placeholder="e.g. 123"
                 />
@@ -828,6 +1086,7 @@ export const VerificationPage: React.FC = () => {
                   type="text"
                   value={pageMetadata.college_name}
                   onChange={(e) => setPageMetadata(prev => ({ ...prev, college_name: e.target.value }))}
+                  onBlur={handleSaveMetadata}
                   className="w-full bg-slate-900 border border-slate-800 rounded px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-blue-500 transition"
                   placeholder="e.g. AAKASH MAHAVIDHYALAYA"
                 />
@@ -838,6 +1097,7 @@ export const VerificationPage: React.FC = () => {
                   type="text"
                   value={pageMetadata.subject_code}
                   onChange={(e) => setPageMetadata(prev => ({ ...prev, subject_code: e.target.value }))}
+                  onBlur={handleSaveMetadata}
                   className="w-full bg-slate-900 border border-slate-800 rounded px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-blue-500 transition"
                   placeholder="e.g. BOT-75P-302"
                 />
@@ -848,6 +1108,7 @@ export const VerificationPage: React.FC = () => {
                   type="text"
                   value={pageMetadata.subject_name}
                   onChange={(e) => setPageMetadata(prev => ({ ...prev, subject_name: e.target.value }))}
+                  onBlur={handleSaveMetadata}
                   className="w-full bg-slate-900 border border-slate-800 rounded px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-blue-500 transition"
                   placeholder="e.g. BOT-PRACTICAL-V"
                 />
@@ -858,6 +1119,7 @@ export const VerificationPage: React.FC = () => {
                   type="text"
                   value={pageMetadata.faculty}
                   onChange={(e) => setPageMetadata(prev => ({ ...prev, faculty: e.target.value }))}
+                  onBlur={handleSaveMetadata}
                   className="w-full bg-slate-900 border border-slate-800 rounded px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-blue-500 transition"
                   placeholder="e.g. SCIENCE"
                 />
@@ -868,25 +1130,11 @@ export const VerificationPage: React.FC = () => {
                   type="number"
                   value={pageMetadata.total_candidates}
                   onChange={(e) => setPageMetadata(prev => ({ ...prev, total_candidates: parseInt(e.target.value) || 0 }))}
+                  onBlur={handleSaveMetadata}
                   className="w-full bg-slate-900 border border-slate-800 rounded px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-blue-500 transition"
                   placeholder="e.g. 15"
                 />
               </div>
-            </div>
-            <div className="flex justify-end">
-              <button
-                onClick={handleSaveMetadata}
-                disabled={isSavingMetadata || !editable}
-                className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-500 disabled:bg-blue-800 disabled:opacity-50 text-white text-xs font-semibold rounded transition cursor-pointer disabled:cursor-not-allowed"
-              >
-                {isSavingMetadata ? (
-                  <>
-                    <Loader2 className="w-3.5 h-3.5 animate-spin" /> Saving...
-                  </>
-                ) : (
-                  'Save Header Info'
-                )}
-              </button>
             </div>
           </div>
 
@@ -935,10 +1183,21 @@ export const VerificationPage: React.FC = () => {
             )}
           </div>
 
+          {/* Cell colour legend — what each highlight in the grid means */}
+          <div className="px-4 py-2 border-b border-slate-800 bg-slate-950/40 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-[10px] text-slate-400">
+            <span className="font-semibold text-slate-300">Legend</span>
+            <span className="flex items-center gap-1.5"><span className="inline-block h-3 w-3 rounded-sm" style={{ backgroundColor: '#7f1d1d' }} /> mobile not 10 digits</span>
+            <span className="flex items-center gap-1.5"><span className="inline-block h-3 w-3 rounded-sm" style={{ backgroundColor: 'rgba(239, 68, 68, 0.45)' }} /> low confidence</span>
+            <span className="flex items-center gap-1.5"><span className="inline-block h-3 w-3 rounded-sm" style={{ backgroundColor: 'rgba(245, 158, 11, 0.4)' }} /> medium confidence</span>
+            <span className="flex items-center gap-1.5"><span className="inline-block h-3 w-3 rounded-sm" style={{ backgroundColor: 'rgba(139, 92, 246, 0.45)' }} /> auto-filled (verify)</span>
+          </div>
+
           <div className="flex-1 w-full ag-theme-quartz-dark">
             <AgGridReact
               rowData={gridData}
               columnDefs={columnDefs}
+              getRowId={(p) => String(p.data.rowIndex)}
+              context={{ moveRowRef, editableRef }}
               onGridReady={onGridReady}
               onCellClicked={onCellClicked}
               onCellValueChanged={handleCellValueChanged}

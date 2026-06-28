@@ -16,6 +16,12 @@ type UpdateCellRequest struct {
 	ColumnIndex int                `json:"column_index"`
 	NewValue    string             `json:"value"`
 	BBox        domain.BoundingBox `json:"bbox"`
+	// Optional. Set by automated/derived fills (auto Batch/Subject, mobile→name
+	// lookup) so they can mark a cell inferred and avoid polluting the correction
+	// feedback loop with machine-generated values.
+	IsInferred *bool    `json:"is_inferred,omitempty"`
+	Confidence *float64 `json:"confidence,omitempty"`
+	Auto       bool     `json:"auto,omitempty"`
 }
 
 type ExtractionService struct {
@@ -70,7 +76,16 @@ func (s *ExtractionService) UpdateCell(ctx context.Context, req UpdateCellReques
 		origValue = req.NewValue
 	}
 
-	// 3. Create updated cell
+	// 3. Create updated cell. Human corrections override with 100% confidence;
+	// automated/derived fills may pass their own confidence and inferred flag.
+	confidence := 1.0
+	if req.Confidence != nil {
+		confidence = *req.Confidence
+	}
+	isInferred := false
+	if req.IsInferred != nil {
+		isInferred = *req.IsInferred
+	}
 	newCell := &domain.ExtractedCell{
 		DocumentID:    req.DocumentID,
 		PageNumber:    req.PageNumber,
@@ -78,7 +93,8 @@ func (s *ExtractionService) UpdateCell(ctx context.Context, req UpdateCellReques
 		ColumnIndex:   req.ColumnIndex,
 		OriginalValue: origValue,
 		CurrentValue:  req.NewValue,
-		Confidence:    1.0, // Human corrections override with 100% confidence
+		Confidence:    confidence,
+		IsInferred:    isInferred,
 		BBox:          req.BBox,
 		CreatedBy:     &updaterID,
 		UpdatedBy:     &updaterID,
@@ -105,8 +121,10 @@ func (s *ExtractionService) UpdateCell(ctx context.Context, req UpdateCellReques
 	}
 
 	// 5. Store Correction Feedback
-	// If active cell has a value that differs from the correction, save it
-	if activeCell != nil && activeCell.CurrentValue != req.NewValue {
+	// If active cell has a value that differs from the correction, save it. Skip
+	// for automated/derived fills — those aren't human corrections and would
+	// otherwise feed machine output back into the learning loop.
+	if !req.Auto && activeCell != nil && activeCell.CurrentValue != req.NewValue {
 		feedback := &domain.CorrectionFeedback{
 			TenantID:            doc.TenantID,
 			DocumentType:        doc.MimeType, // fallback to mime type or template name
@@ -147,4 +165,10 @@ func (s *ExtractionService) UpdateCell(ctx context.Context, req UpdateCellReques
 
 func (s *ExtractionService) GetHistory(ctx context.Context, docID uuid.UUID, pageNum, rowIdx, colIdx int) ([]*domain.ExtractedCell, error) {
 	return s.extRepo.GetCellHistory(ctx, docID, pageNum, rowIdx, colIdx)
+}
+
+// LookupExaminer resolves a mobile number to the best-known examiner name for the
+// tenant (latest verified correction first, then the seeded registry).
+func (s *ExtractionService) LookupExaminer(ctx context.Context, mobile string) (*domain.ExaminerMatch, error) {
+	return s.extRepo.LookupExaminerByMobile(ctx, mobile)
 }

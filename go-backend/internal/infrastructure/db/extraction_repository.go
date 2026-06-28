@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -437,6 +438,94 @@ func (r *ExtractionRepository) GetPendingFeedback(ctx context.Context, limit int
 		feedbackList = append(feedbackList, &f)
 	}
 	return feedbackList, nil
+}
+
+// LookupExaminerByMobile resolves a mobile number to the best-known examiner name
+// for the tenant. Priority (point #3 logic): the most recent HUMAN-VERIFIED
+// correction (a non-inferred name on a submitted document, matched by mobile) wins
+// over the seeded examiner_registry, irrespective of vote counts. Ambiguous
+// registry numbers (reused across people) never auto-fill.
+func (r *ExtractionRepository) LookupExaminerByMobile(ctx context.Context, mobile string) (*domain.ExaminerMatch, error) {
+	digits := onlyDigitsStr(mobile)
+	if len(digits) < 10 {
+		return &domain.ExaminerMatch{Mobile: digits}, nil
+	}
+	key := digits[len(digits)-10:]
+
+	tenantID, err := contextutil.GetTenantID(ctx)
+	if err != nil {
+		return nil, errors.New("tenant context required")
+	}
+
+	// 1. Latest human-verified correction (newest wins).
+	verifiedQuery := `
+		WITH latest AS (
+			SELECT DISTINCT ON (c.document_id, c.page_number, c.row_index, c.column_index)
+				c.document_id, c.page_number, c.row_index, c.column_index,
+				c.current_value, c.is_inferred, c.updated_at
+			FROM extracted_cells c
+			JOIN documents d ON d.id = c.document_id
+			WHERE d.tenant_id = $1
+			  AND d.verification_status = 'submitted'
+			  AND c.column_index IN (2, 3)
+			ORDER BY c.document_id, c.page_number, c.row_index, c.column_index, c.version DESC
+		)
+		SELECT n.current_value
+		FROM latest n
+		JOIN latest m
+		  ON n.document_id = m.document_id
+		 AND n.page_number = m.page_number
+		 AND n.row_index = m.row_index
+		WHERE n.column_index = 2 AND m.column_index = 3
+		  AND n.is_inferred = FALSE
+		  AND length(regexp_replace(n.current_value, '[^A-Za-z]', '', 'g')) >= 2
+		  AND right(regexp_replace(m.current_value, '\D', '', 'g'), 10) = $2
+		ORDER BY GREATEST(n.updated_at, m.updated_at) DESC
+		LIMIT 1
+	`
+	var name string
+	err = r.db.QueryRowContext(ctx, verifiedQuery, tenantID, key).Scan(&name)
+	if err == nil && strings.TrimSpace(name) != "" {
+		return &domain.ExaminerMatch{Mobile: key, Name: name, Source: "verified"}, nil
+	}
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("verified lookup failed: %w", err)
+	}
+
+	// 2. Seeded registry fallback. Non-ambiguous match preferred; if only ambiguous
+	// numbers exist we report ambiguous and return no name (never guess).
+	registryQuery := `
+		SELECT canonical_name, is_ambiguous
+		FROM examiner_registry
+		WHERE tenant_id = $1
+		  AND canonical_name IS NOT NULL
+		  AND right(regexp_replace(mobile, '\D', '', 'g'), 10) = $2
+		ORDER BY is_ambiguous ASC, times_seen DESC
+		LIMIT 1
+	`
+	var regName string
+	var ambiguous bool
+	err = r.db.QueryRowContext(ctx, registryQuery, tenantID, key).Scan(&regName, &ambiguous)
+	if err != nil {
+		// Registry table may be absent (migration not applied) or simply no row —
+		// treat as "unknown" rather than a hard error.
+		return &domain.ExaminerMatch{Mobile: key}, nil
+	}
+	if ambiguous {
+		return &domain.ExaminerMatch{Mobile: key, Ambiguous: true}, nil
+	}
+	return &domain.ExaminerMatch{Mobile: key, Name: regName, Source: "registry"}, nil
+}
+
+// onlyDigitsStr strips everything but ASCII digits.
+func onlyDigitsStr(s string) string {
+	var b strings.Builder
+	for _, ch := range s {
+		if ch >= '0' && ch <= '9' {
+			b.WriteRune(ch)
+		}
+	}
+	return b.String()
 }
 
 func (r *ExtractionRepository) MarkFeedbackApplied(ctx context.Context, ids []uuid.UUID) error {

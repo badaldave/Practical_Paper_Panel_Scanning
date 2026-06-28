@@ -83,6 +83,9 @@ func SetupRouter(cfg RouterConfig) *gin.Engine {
 			docs.GET("/:id/export/excel", perm("documents.export"), cfg.ExportHandler.ExportExcel)
 		}
 
+		// Examiner directory lookup (mobile -> best-known name) for verification.
+		authRequired.GET("/examiners/lookup", perm("verification.perform"), cfg.ExtractionHandler.LookupExaminer)
+
 		// Verification pool, locking & per-page progress
 		verif := authRequired.Group("/verification")
 		{

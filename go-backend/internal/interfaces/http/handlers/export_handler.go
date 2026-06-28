@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -13,6 +14,18 @@ import (
 	"university-result-processing/backend/internal/application/settings"
 	"university-result-processing/backend/internal/domain"
 )
+
+// exportRowIsBlank reports whether a grouped row carries no real examiner content
+// — i.e. both the Examiner Name (col 2) and Mobile Number (col 3) are empty. Such
+// rows (pre-printed-but-unfilled slots, or rows that only picked up an auto Batch/
+// Subject value) are skipped on export.
+func exportRowIsBlank(cols map[int]*domain.ExtractedCell) bool {
+	hasText := func(c int) bool {
+		cell, ok := cols[c]
+		return ok && strings.TrimSpace(cell.CurrentValue) != ""
+	}
+	return !hasText(2) && !hasText(3)
+}
 
 type ExportHandler struct {
 	docRepo     domain.DocumentRepository
@@ -194,6 +207,9 @@ func (h *ExportHandler) ExportCSV(c *gin.Context) {
 	// Write rows
 	for _, key := range rowKeys {
 		cols := rowMap[key]
+		if exportRowIsBlank(cols) {
+			continue
+		}
 		csvRow := []string{strconv.Itoa(key.Page), strconv.Itoa(key.Row)}
 
 		// Values
@@ -320,6 +336,9 @@ func (h *ExportHandler) ExportExcel(c *gin.Context) {
 
 	for _, key := range rowKeys {
 		cols := rowMap[key]
+		if exportRowIsBlank(cols) {
+			continue
+		}
 		csvRow := []string{strconv.Itoa(key.Page), strconv.Itoa(key.Row)}
 
 		// Values

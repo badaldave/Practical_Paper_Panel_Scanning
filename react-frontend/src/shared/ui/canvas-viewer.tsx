@@ -48,23 +48,17 @@ export const CanvasViewer: React.FC<CanvasViewerProps> = ({
     img.src = imageUrl;
     img.onload = () => {
       setImage(img);
-      resetTransforms(img);
+      resetTransforms();
     };
   }, [imageUrl]);
 
-  const resetTransforms = (img: HTMLImageElement) => {
-    if (!containerRef.current) return;
-    const containerW = containerRef.current.clientWidth;
-    const containerH = containerRef.current.clientHeight;
-    
-    // Fit image inside container by default
-    const scaleX = containerW / img.width;
-    const scaleY = containerH / img.height;
-    const initialZoom = Math.min(scaleX, scaleY, 1.0);
-    
+  const resetTransforms = () => {
+    // Default to 53% zoom, left-aligned (top-left), so the scan reads larger.
+    const initialZoom = 0.53;
+
     setZoom(initialZoom);
-    setPanX((containerW - img.width * initialZoom) / 2);
-    setPanY((containerH - img.height * initialZoom) / 2);
+    setPanX(0);
+    setPanY(0);
     setRotation(0);
   };
 
@@ -217,7 +211,7 @@ export const CanvasViewer: React.FC<CanvasViewerProps> = ({
             <RotateCw className="w-4 h-4" />
           </button>
           <button
-            onClick={() => image && resetTransforms(image)}
+            onClick={() => image && resetTransforms()}
             className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 transition-all active:scale-95"
             title="Reset Fit"
           >

@@ -369,7 +369,7 @@ class WorkerRepository:
             WITH latest AS (
                 SELECT DISTINCT ON (c.document_id, c.page_number, c.row_index, c.column_index)
                     c.document_id, c.page_number, c.row_index, c.column_index,
-                    c.current_value, c.is_inferred
+                    c.current_value, c.is_inferred, c.updated_at
                 FROM extracted_cells c
                 JOIN documents d ON d.id = c.document_id
                 WHERE d.tenant_id = %s
@@ -380,7 +380,8 @@ class WorkerRepository:
             )
             SELECT n.current_value AS name,
                    n.is_inferred AS name_inferred,
-                   m.current_value AS mobile
+                   m.current_value AS mobile,
+                   GREATEST(n.updated_at, m.updated_at) AS updated_at
             FROM latest n
             JOIN latest m
               ON n.document_id = m.document_id

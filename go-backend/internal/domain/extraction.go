@@ -67,6 +67,15 @@ type CorrectionFeedback struct {
 	CreatedAt           time.Time  `json:"created_at"`
 }
 
+// ExaminerMatch is the best-known examiner identity for a mobile number, resolved
+// from prior human-verified corrections and the seeded registry.
+type ExaminerMatch struct {
+	Mobile    string `json:"mobile"`
+	Name      string `json:"name"`
+	Ambiguous bool   `json:"ambiguous"`
+	Source    string `json:"source"` // "verified", "registry", or "" when unknown
+}
+
 type ExtractionRepository interface {
 	CreateExtraction(ctx context.Context, ext *Extraction) error
 	GetExtractionByDocID(ctx context.Context, docID uuid.UUID) (*Extraction, error)
@@ -84,4 +93,9 @@ type ExtractionRepository interface {
 	CreateFeedback(ctx context.Context, feedback *CorrectionFeedback) error
 	GetPendingFeedback(ctx context.Context, limit int) ([]*CorrectionFeedback, error)
 	MarkFeedbackApplied(ctx context.Context, ids []uuid.UUID) error
+
+	// LookupExaminerByMobile resolves a 10-digit mobile to the best-known examiner
+	// name for the current tenant: the most recent human-verified correction wins
+	// over the seeded registry. Returns a match with empty Name when unknown.
+	LookupExaminerByMobile(ctx context.Context, mobile string) (*ExaminerMatch, error)
 }

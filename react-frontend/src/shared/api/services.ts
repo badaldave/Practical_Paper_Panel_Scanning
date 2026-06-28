@@ -170,6 +170,22 @@ export const verificationApi = {
   submit: (id: string) => apiClient<{ message: string }>(`/api/verification/${id}/submit`, { method: 'POST' }),
 };
 
+// ---------- Examiner directory ----------
+export interface ExaminerLookup {
+  mobile: string;
+  name: string;
+  ambiguous: boolean;
+  source: string; // 'verified' | 'registry' | '' (none)
+}
+
+export const examinersApi = {
+  // Best-known examiner name for a 10-digit mobile, using the latest human-verified
+  // correction first, then the seeded registry. Returns empty name when unknown or
+  // ambiguous.
+  lookup: (mobile: string) =>
+    apiClient<ExaminerLookup>(`/api/examiners/lookup?mobile=${encodeURIComponent(mobile)}`),
+};
+
 // ---------- Settings ----------
 export interface TenantSettings {
   low_confidence_threshold: number;

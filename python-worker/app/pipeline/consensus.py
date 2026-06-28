@@ -119,6 +119,11 @@ def build_examiner_directory(pairs):
     are skipped so the directory can't amplify its own earlier mistakes."""
     mob_to_names = defaultdict(Counter)
     name_to_mobs = defaultdict(Counter)
+    # Authoritative override (point #3): the most recent HUMAN-VERIFIED correction
+    # for a mobile wins outright over vote counts. Only pairs carrying an
+    # `updated_at` (i.e. read back from submitted documents, not the registry seed)
+    # are eligible — keyed by mobile, keeping the newest.
+    mob_to_verified = {}  # mob -> (name, updated_at)
     for p in pairs or []:
         if p.get("name_inferred"):
             continue
@@ -132,7 +137,13 @@ def build_examiner_directory(pairs):
         weight = p.get("votes") or 1
         mob_to_names[mob][name] += weight
         name_to_mobs[_nname(name)][mob] += weight
-    return {"mob_to_names": mob_to_names, "name_to_mobs": name_to_mobs}
+        ts = p.get("updated_at")
+        if ts is not None:
+            cur = mob_to_verified.get(mob)
+            if cur is None or ts > cur[1]:
+                mob_to_verified[mob] = (name, ts)
+    return {"mob_to_names": mob_to_names, "name_to_mobs": name_to_mobs,
+            "mob_to_verified": mob_to_verified}
 
 
 def apply_document_consensus(all_tables, examiner_directory=None):
@@ -151,6 +162,7 @@ def apply_document_consensus(all_tables, examiner_directory=None):
     directory = examiner_directory or {}
     mob_to_names = directory.get("mob_to_names", {})
     name_to_mobs = directory.get("name_to_mobs", {})
+    mob_to_verified = directory.get("mob_to_verified", {})
     have_directory = bool(mob_to_names or name_to_mobs)
     entries = []
     for table in all_tables:
@@ -161,6 +173,7 @@ def apply_document_consensus(all_tables, examiner_directory=None):
             if name_cell is None and mobile_cell is None:
                 continue
             entries.append({
+                "row": row,
                 "name_cell": name_cell,
                 "mobile_cell": mobile_cell,
                 "nname": _nname(name_cell["value"]) if name_cell else "",
@@ -188,14 +201,46 @@ def apply_document_consensus(all_tables, examiner_directory=None):
             for name, cnt in mob_to_names.get(mob, {}).items():
                 weighted += [name] * min(cnt, DB_VOTE_CAP)
 
+        # Point #3: a recent human-verified correction for any of this cluster's
+        # mobiles is authoritative — it wins over both cross-document vote counts
+        # and this sheet's own reads, irrespective of count. Newest verified wins.
+        auth_name, auth_ts = None, None
+        for mob in cluster_mobs:
+            v = mob_to_verified.get(mob)
+            if v is not None and (auth_ts is None or v[1] > auth_ts):
+                auth_name, auth_ts = v[0], v[1]
+
         consensus = None
-        if weighted:
+        from_db = False
+        if auth_name is not None:
+            consensus = auth_name
+            from_db = True
+        elif weighted:
             consensus = _medoid(weighted)
             # Did the chosen value come from this sheet, or only from the DB?
             from_db = _nname(consensus) not in {_nname(x) for x in name_reads}
+
+        if consensus is not None:
             for m in members:
                 cell = m["name_cell"]
                 if cell is None:
+                    # Point #4: the row never got a name cell (none read) — create
+                    # one, flagged inferred, so the verifier sees a value to check
+                    # rather than a silent blank. Borrow the mobile cell's bbox so
+                    # it lines up on the right row.
+                    row = m.get("row")
+                    if row is None:
+                        continue
+                    bbox = (m["mobile_cell"]["bbox"] if m.get("mobile_cell")
+                            else {"x": 0.0, "y": 0.0, "width": 0.0, "height": 0.0})
+                    new_cell = {"column_index": NAME_COL, "value": consensus,
+                                "confidence": INFERRED_CONFIDENCE, "is_inferred": True,
+                                "bbox": bbox}
+                    row.setdefault("cells", []).append(new_cell)
+                    m["name_cell"] = new_cell
+                    name_changes += 1
+                    if from_db:
+                        db_name_backfills += 1
                     continue
                 if _nname(cell["value"]) != _nname(consensus):
                     cell["value"] = consensus
