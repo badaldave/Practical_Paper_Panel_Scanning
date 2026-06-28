@@ -411,13 +411,15 @@ export const VerificationPage: React.FC = () => {
       }
     ];
 
-    // Sensible per-column widths instead of an equal default. Examiner Name flexes
-    // to fill remaining space; the others size to their content.
-    const colWidths: Record<number, number> = {
-      [SUBJECT_ID_COL]: 120,
-      [SUBJECT_CODE_COL]: 130,
-      [BATCH_COL]: 85,
-      [MOBILE_COL]: 150,
+    // All data columns flex so they always fill the panel width — no horizontal
+    // scrollbar. Examiner Name gets the most room; Batch the least. minWidth keeps
+    // each readable if the panel gets very narrow.
+    const colFlex: Record<number, { flex: number; minWidth: number }> = {
+      [SUBJECT_ID_COL]: { flex: 1, minWidth: 90 },
+      [SUBJECT_CODE_COL]: { flex: 1, minWidth: 100 },
+      [BATCH_COL]: { flex: 0.6, minWidth: 64 },
+      [NAME_COL]: { flex: 2.2, minWidth: 140 },
+      [MOBILE_COL]: { flex: 1.3, minWidth: 120 },
     };
 
     // Display order: Subject ID (col 4), Subject Code (col 0), Batch (1),
@@ -435,14 +437,14 @@ export const VerificationPage: React.FC = () => {
     for (const c of order) {
       const colName = colLabels[c] ?? `Column ${c}`;
 
+      const f = colFlex[c] ?? { flex: 1, minWidth: 100 };
       cols.push({
         headerName: colName,
         field: `col_${c}`,
         editable: editable,
         resizable: true,
-        ...(c === NAME_COL
-          ? { flex: 2, minWidth: 200 }
-          : { width: colWidths[c] ?? 140 }),
+        flex: f.flex,
+        minWidth: f.minWidth,
         // Custom value getter/setter to read cell nested details
         valueGetter: (params) => {
           if (!params.data) return '';
@@ -715,9 +717,14 @@ export const VerificationPage: React.FC = () => {
       if (colIdx === MOBILE_COL) {
         const digits = onlyDigits(newValue);
         if (digits.length === 10) {
-          const nameVal = valAt(working, currentPage, rowIdx, NAME_COL);
-          const nameInferred = cellAt(working, currentPage, rowIdx, NAME_COL)?.is_inferred ?? false;
-          if (nameLetters(nameVal).length < 2 || nameInferred) {
+          const nameCellObj = cellAt(working, currentPage, rowIdx, NAME_COL);
+          const nameVal = nameCellObj?.current_value ?? '';
+          const nameInferred = nameCellObj?.is_inferred ?? false;
+          // Fill unless the name is one the human themselves typed/confirmed
+          // (confidence 1.0, not inferred). Empty, inferred, or low-confidence OCR
+          // names are refreshed from the directory.
+          const humanConfirmed = !nameInferred && (nameCellObj?.confidence ?? 0) >= 1.0 && nameLetters(nameVal).length >= 2;
+          if (!humanConfirmed) {
             try {
               const res = await examinersApi.lookup(digits);
               if (res?.name && !res.ambiguous) {
