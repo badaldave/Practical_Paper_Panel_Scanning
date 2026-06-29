@@ -8,14 +8,15 @@ are pinned where they matter.
 
 ## 1. What gets deployed
 
-Four components on one machine, all via Docker, behind the existing **Apache** front door:
+Four components on one machine, all via Docker. The **`react-frontend` nginx container is the
+front door** (port 80) — there is no separate host web server:
 
 | Component | Image / base | Role | Port |
 |---|---|---|---|
 | PostgreSQL | `postgres:16-alpine` | Database **and** job queue (services talk only through it) | 5432 → host **5439** |
 | go-backend | `golang:1.25-alpine` build → `alpine:3.19` | REST API (auth, upload, export) | **8081** |
 | python-worker | `python:3.12` (+ CUDA for GPU) | OCR daemon. Polls DB, **no HTTP** | none (DB + GPU only) |
-| react-frontend | built with `node:20-alpine` | SPA static files (served by Apache) | n/a (Apache serves) |
+| react-frontend | `node:20-alpine` build → `nginx:1.25-alpine` | Serves the SPA **and** reverse-proxies `/api` to the backend (§8) | **80** |
 
 There is **no RPC** between backend and worker — they coordinate through the `processing_jobs`
 table. The worker can therefore be restarted independently.
@@ -28,7 +29,7 @@ no configuration needed.
 ## 2. Host hardware (this deployment)
 
 - **OS:** Ubuntu 22.04 / 24.04 LTS
-- **CPU:** Intel i7 · **RAM:** 16 GB (~13 GB usable — shared with the existing Python program + Apache)
+- **CPU:** Intel i7 · **RAM:** 16 GB (~13 GB usable — shared with the existing Python program)
 - **GPU:** NVIDIA GeForce RTX 5070 12 GB (**Blackwell, compute capability sm_120**)
 - **Disk:** keep **≥ 100 GB free** on the partition holding `go-backend/uploads` (originals +
   rendered page PNGs). See §9 for why.
@@ -189,6 +190,9 @@ docker compose up -d --build db go-backend
 # GPU OCR worker (base compose + GPU override; Dockerfile.gpu defaults to CUDA 12.8 / cu128)
 docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build python-worker
 
+# Front door — the nginx SPA container on port 80 (serves the UI + proxies /api; see §8)
+docker compose up -d --build react-frontend
+
 docker compose ps                 # all "running"/"healthy"
 docker compose logs -f python-worker   # watch provider init + per-job timings
 ```
@@ -220,61 +224,60 @@ docker compose logs python-worker | grep "Inference device"
 
 ---
 
-## 8. Apache front door (serve the SPA + proxy the API + enforce upload limits)
+## 8. Front door — the `react-frontend` nginx container (serves the SPA + proxies the API)
 
-Apache already owns 80/443, so we **do not** run the frontend container on port 80. Apache serves
-the built static files and reverse-proxies `/api` to the backend. This is also where the
-**upload size limit and timeouts** are enforced — no code change needed.
+There is **no Apache on this host.** The `react-frontend` service *is* the front door: a two-stage
+build (`react-frontend/Dockerfile`) compiles the SPA with `node:20-alpine`, then serves the static
+`dist/` with **nginx** on port **80**. The same nginx reverse-proxies `/api` to the backend and
+enforces the **upload size limit + timeouts** — no host web server, no manual `dist/` copy.
 
-```bash
-# Build the frontend once (Node 20) and publish it where Apache serves it
-docker run --rm -v "$PWD/react-frontend:/app" -w /app node:20-alpine \
-  sh -c "npm install && npm run build"
-sudo mkdir -p /var/www/marksheet
-sudo cp -r react-frontend/dist/* /var/www/marksheet/
+It is part of `docker-compose.yml`, so it comes up with the rest of the stack (§7); nothing extra
+to install or enable. The behaviour is defined entirely by `react-frontend/nginx.conf`:
 
-sudo a2enmod proxy proxy_http rewrite headers
+```nginx
+server {
+    listen 80;
+    server_name localhost;
+
+    client_max_body_size 5G;          # max upload (a 1000-page scan PDF is ~0.1–0.5 GB)
+
+    root /usr/share/nginx/html;       # the built SPA (dist/), copied in by the Dockerfile
+    index index.html;
+
+    location / {                      # SPA: serve files, fall back to index.html for client routes
+        try_files $uri $uri/ /index.html;
+    }
+
+    location /api/ {                  # API -> Go backend, by compose service name on the bridge network
+        proxy_pass http://go-backend:8081;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        proxy_connect_timeout 300s;   # 5 min, so large uploads don't time out mid-transfer
+        proxy_send_timeout 300s;
+        proxy_read_timeout 300s;
+        send_timeout 300s;
+    }
+}
 ```
 
-Vhost (`/etc/apache2/sites-available/marksheet.conf`):
+Notes:
+- `proxy_pass http://go-backend:8081;` has **no trailing path**, so the full URI is forwarded
+  (`/api/auth/login` → `go-backend:8081/api/auth/login`) — which is what the Go router expects.
+  `go-backend` resolves via Docker's embedded DNS on the shared `ocr_network`.
+- **When the frontend changes**, rebuild just that service — the API and worker keep running:
+  ```bash
+  docker compose up -d --build react-frontend
+  ```
 
-```apache
-<VirtualHost *:443>
-    ServerName marksheet.yourdomain
-    DocumentRoot /var/www/marksheet
-
-    # ---- Upload limit + timeouts (covers a ~1000-page batch comfortably) ----
-    LimitRequestBody 2147483648      # 2 GiB max upload (a 1000-page scan PDF is ~0.1–0.5 GB)
-    Timeout 600                      # 10 min, so large uploads don't time out mid-transfer
-    ProxyTimeout 600
-
-    # ---- API -> Go backend ----
-    ProxyPreserveHost On
-    ProxyPass        /api  http://127.0.0.1:8081/api
-    ProxyPassReverse /api  http://127.0.0.1:8081/api
-
-    # ---- SPA: serve files, fall back to index.html for client routes ----
-    <Directory /var/www/marksheet>
-        Require all granted
-        RewriteEngine On
-        RewriteCond %{REQUEST_FILENAME} !-f
-        RewriteCond %{REQUEST_FILENAME} !-d
-        RewriteRule ^ /index.html [L]
-    </Directory>
-
-    # ---- your TLS cert directives here ----
-    # SSLEngine on
-    # SSLCertificateFile      /etc/ssl/...
-    # SSLCertificateKeyFile   /etc/ssl/...
-</VirtualHost>
-```
-
-```bash
-sudo a2ensite marksheet
-sudo apache2ctl configtest && sudo systemctl reload apache2
-```
-
-When the frontend changes, rebuild and re-copy `dist/` — the API and worker keep running.
+> ⚠️ **TLS is not configured.** This nginx listens on **port 80, plain HTTP only** — there is no
+> `listen 443 ssl` block and no certificate. With Apache gone, nothing terminates TLS. If this
+> server is reachable beyond a trusted LAN, add a `listen 443 ssl;` block + certs to
+> `react-frontend/nginx.conf` (and publish `443:443` in compose), or place a TLS-terminating
+> proxy / load balancer in front. Decide this before go-live.
 
 ---
 
@@ -292,10 +295,10 @@ but watch RAM (each OCR pipeline uses ~2–4 GB).
 
 **Plan capacity by page count, not megabytes.** The three safeguards for large files:
 
-1. **Upload size + timeout — handled in Apache (§8):** `LimitRequestBody 2147483648` (2 GiB) and
-   `Timeout/ProxyTimeout 600`. The code itself has no hard cap, so Apache is where we set it.
-   (OCR is asynchronous via the job queue, so the HTTP request only spans the *upload*, not the
-   hours of OCR — 10 min is plenty for the transfer.)
+1. **Upload size + timeout — handled in the nginx front door (§8):** `client_max_body_size 5G` and
+   the `proxy_*_timeout 300s` directives in `react-frontend/nginx.conf`. The code itself has no hard
+   cap, so nginx is where we set it. (OCR is asynchronous via the job queue, so the HTTP request only
+   spans the *upload*, not the hours of OCR — 5 min is plenty for the transfer.)
 2. **Disk headroom:** keep **≥ 100 GB free** on the `uploads` volume. A 1000-page job stores the
    original + ~1000 rendered PNGs. (DB growth is negligible — ~30k cells for 1000 pages.) Monitor
    with `df -h` and alert at 80%.
@@ -332,6 +335,7 @@ one bad page won't kill the whole job.
 | `could not select device driver "nvidia"` | NVIDIA Container Toolkit not configured — redo §4.2 |
 | `torch.cuda.is_available()` is `False` | Driver too old for Blackwell (need ≥ 570), or the GPU image wasn't used — rebuild with `Dockerfile.gpu` (§4/§7); it keeps running on CPU meanwhile |
 | Worker runs but processes nothing | Backend must have `MOCK_WORKER=false` (it does); check `docker compose logs python-worker` for dequeue lines |
-| Upload fails on a large file | Raise `LimitRequestBody`/`Timeout` in the Apache vhost (§8) |
+| Upload fails on a large file | Raise `client_max_body_size` / `proxy_*_timeout` in `react-frontend/nginx.conf` (§8), then `docker compose up -d --build react-frontend` |
+| UI loads but every API call 404s / login fails | `react-frontend` can't reach `go-backend` — confirm both are on `ocr_network` and the backend is up (`docker compose ps`); the `/api/` proxy resolves `go-backend` by service name |
 | Worker OOM-killed on a big job | Lower `python-worker` `mem_limit` pressure / add host RAM; per-page subprocess isolation logs the page and continues |
 | `Migration ... failed` | Ensure `db` is healthy first (`docker compose ps db`) and the `DATABASE_URL` password matches §5 |

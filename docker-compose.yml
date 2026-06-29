@@ -49,8 +49,7 @@ services:
       - ocr_network
 
   # CPU OCR worker. Runs inside compose so `docker compose up` starts the whole
-  # stack (db + backend + worker). This is the CPU image (no GPU passthrough);
-  # for GPU use docker-compose.gpu.yml or run run_local_worker.ps1 on the host.
+  # stack (db + backend + worker).
   python-worker:
     build:
       context: ./python-worker
@@ -71,6 +70,19 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    networks:
+      - ocr_network
+
+  react-frontend:
+    build:
+      context: ./react-frontend
+      dockerfile: Dockerfile
+    container_name: university_ocr_frontend
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    depends_on:
+      - go-backend
     networks:
       - ocr_network
 
