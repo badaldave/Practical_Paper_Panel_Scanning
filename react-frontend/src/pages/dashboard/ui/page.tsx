@@ -193,7 +193,7 @@ export const DashboardPage: React.FC = () => {
         {canUpload && (
           <Card className="p-5">
             <h3 className="mb-1 text-sm font-semibold text-white">Process New Scan</h3>
-            <p className="mb-3 text-xs text-slate-400">Marksheets, examiner panels, result registers or attendance lists.</p>
+            <p className="mb-3 text-xs text-slate-400">Practical panels, examiner panels, result registers or attendance lists.</p>
             <input type="file" ref={fileInputRef} onChange={handleFileUpload} className="hidden" accept=".pdf,.png,.jpg,.jpeg" />
             <button
               disabled={isUploading}

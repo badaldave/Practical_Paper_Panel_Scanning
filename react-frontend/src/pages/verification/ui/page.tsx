@@ -943,7 +943,7 @@ export const VerificationPage: React.FC = () => {
           </div>
 
           <p className="text-xs text-slate-400">
-            The OCR engine is currently segmenting cells and extracting tabular marksheet data. This will take a moment.
+            The OCR engine is currently segmenting cells and extracting tabular panel data. This will take a moment.
           </p>
           <button
             onClick={() => navigate('/documents')}
@@ -1105,7 +1105,7 @@ export const VerificationPage: React.FC = () => {
           {/* Metadata Form Section */}
           <div className="p-4 border-b border-slate-800 bg-slate-950/40">
             <div className="flex items-center gap-2 mb-3">
-              <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Marksheet Header Information</h3>
+              <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Panel Header Information</h3>
               {isSavingMetadata && (
                 <span className="flex items-center gap-1 text-[10px] text-blue-400 font-semibold">
                   <Loader2 className="w-3 h-3 animate-spin" /> Saving…
