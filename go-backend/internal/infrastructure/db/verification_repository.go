@@ -149,6 +149,10 @@ func (r *VerificationRepository) GetState(ctx context.Context, docID uuid.UUID) 
 // Claim atomically locks an unlocked, claimable document and resets page
 // progress (per the "start from start" takeover rule — prior cell edits remain
 // in history, only the per-page review checklist is cleared).
+//
+// A document that was already submitted can be claimed again — files may be
+// verified more than once, and each new submission simply overwrites the
+// document's status with whatever the latest pass produces.
 func (r *VerificationRepository) Claim(ctx context.Context, docID, userID uuid.UUID) (bool, error) {
 	tenantID, err := contextutil.GetTenantID(ctx)
 	if err != nil {
@@ -168,9 +172,8 @@ func (r *VerificationRepository) Claim(ctx context.Context, docID, userID uuid.U
 			verification_started_at = COALESCE(verification_started_at, now()),
 			current_page = 1, last_activity_at = now(), updated_at = now()
 		WHERE id = $1 AND tenant_id = $3
-		  AND status = 'extracted'
+		  AND status IN ('extracted', 'verified')
 		  AND locked_by IS NULL
-		  AND verification_status <> 'submitted'
 		  AND (assigned_to IS NULL OR assigned_to = $2)
 		RETURNING id
 	`, docID, userID, tenantID).Scan(&claimedID)

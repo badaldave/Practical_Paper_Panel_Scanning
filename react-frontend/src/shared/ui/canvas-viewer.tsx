@@ -42,25 +42,52 @@ export const CanvasViewer: React.FC<CanvasViewerProps> = ({
   const [isDragging, setIsDragging] = useState<boolean>(false);
   const [dragStart, setDragStart] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
 
+  // Zoom that fits the whole page inside the current container size — recomputed
+  // (not a fixed guess) so the scan always fits regardless of panel width or
+  // rotation, and the verifier never has to pan to see the rest of the page.
+  const FIT_MARGIN = 0.98;
+  const computeFitZoom = (img: HTMLImageElement, rot: number): number => {
+    const container = containerRef.current;
+    const cw = container?.clientWidth || 800;
+    const ch = container?.clientHeight || 600;
+    const rotated = rot % 180 !== 0;
+    const iw = rotated ? img.height : img.width;
+    const ih = rotated ? img.width : img.height;
+    if (!iw || !ih) return 1;
+    return Math.min(cw / iw, ch / ih) * FIT_MARGIN;
+  };
+
   // Load Image
   useEffect(() => {
     const img = new Image();
     img.src = imageUrl;
     img.onload = () => {
       setImage(img);
-      resetTransforms();
+      resetTransforms(img);
     };
   }, [imageUrl]);
 
-  const resetTransforms = () => {
-    // Default to 53% zoom, left-aligned (top-left), so the scan reads larger.
-    const initialZoom = 0.53;
-
-    setZoom(initialZoom);
+  const resetTransforms = (img?: HTMLImageElement | null) => {
+    const target = img ?? image;
+    setRotation(0);
     setPanX(0);
     setPanY(0);
-    setRotation(0);
+    if (target) setZoom(computeFitZoom(target, 0));
   };
+
+  // Re-fit whenever the container is resized (e.g. the panel split changes, or
+  // the window resizes) so the page keeps fitting without manual zoom/pan.
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container || !image) return;
+    const ro = new ResizeObserver(() => {
+      setZoom(computeFitZoom(image, rotation));
+      setPanX(0);
+      setPanY(0);
+    });
+    ro.observe(container);
+    return () => ro.disconnect();
+  }, [image, rotation]);
 
   // Render Loop
   useEffect(() => {

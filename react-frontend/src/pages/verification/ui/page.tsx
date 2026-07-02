@@ -135,6 +135,9 @@ export const VerificationPage: React.FC = () => {
     total_candidates: 0,
   });
   const [isSavingMetadata, setIsSavingMetadata] = useState<boolean>(false);
+  // Always-current mirror of `pageMetadata` so page-switch can flush whatever was
+  // last typed even if the field never blurred (e.g. Alt+→ while still focused).
+  const pageMetadataRef = useRef(pageMetadata);
   const gridApiRef = useRef<GridApi | null>(null);
   // Rows whose Batch the user edited by hand (keyed `page:row`) — auto Batch
   // numbering must not overwrite these. Pages already auto-synced once on open.
@@ -208,6 +211,18 @@ export const VerificationPage: React.FC = () => {
 
   const currentPageVerified = verifiedPageSet.has(currentPage);
 
+  // Whether the document is ready to submit. The page currently on screen counts
+  // even if it hasn't been explicitly (or switch-)verified yet, so a verifier can
+  // land on the last page and submit directly without an extra round trip away
+  // and back — submitDoc marks it verified for real before calling the API.
+  const canSubmit = useMemo(() => {
+    const total = vState?.total_pages || 0;
+    if (total <= 0) return false;
+    const covered = new Set(verifiedPageSet);
+    covered.add(currentPage);
+    return covered.size >= total;
+  }, [verifiedPageSet, currentPage, vState]);
+
   const toggleCurrentPage = async () => {
     if (!id || !editable) return;
     setVBusy(true);
@@ -221,10 +236,16 @@ export const VerificationPage: React.FC = () => {
     }
   };
 
+  // Submitting also covers the page currently on screen even if the user never
+  // left it (so the last page of a document doesn't need a round-trip switch
+  // away-and-back just to count as verified).
   const submitDoc = async () => {
     if (!id) return;
     setVBusy(true);
     try {
+      if (!currentPageVerified) {
+        await verificationApi.markPage(id, currentPage, true);
+      }
       await verificationApi.submit(id);
       alert('Document submitted — verification complete.');
       navigate('/queue');
@@ -235,6 +256,56 @@ export const VerificationPage: React.FC = () => {
       setVBusy(false);
     }
   };
+
+  // Persist a given page's header metadata. Takes explicit page/metadata (rather
+  // than reading currentPage/pageMetadata state) so a page-switch can flush the
+  // page being LEFT even after currentPage has already moved on.
+  const persistMetadata = async (page: number, metadata: typeof pageMetadata) => {
+    if (!id || !editable) return;
+    try {
+      setIsSavingMetadata(true);
+      await apiClient(`/api/documents/${id}/pages/${page}`, {
+        method: 'PUT',
+        json: {
+          college_code: metadata.college_code || null,
+          college_name: metadata.college_name || null,
+          subject_code: metadata.subject_code || null,
+          subject_name: metadata.subject_name || null,
+          faculty: metadata.faculty || null,
+          total_candidates: metadata.total_candidates ? parseInt(metadata.total_candidates as any) : null,
+        }
+      });
+
+      setDocDetails(prev => {
+        if (!prev) return null;
+        return {
+          ...prev,
+          pages: prev.pages.map(p => (p.page_number === page ? { ...p, ...metadata } : p)),
+        };
+      });
+    } catch (err) {
+      console.error('Failed to save page metadata:', err);
+    } finally {
+      setIsSavingMetadata(false);
+    }
+  };
+
+  const handleSaveMetadata = () => persistMetadata(currentPage, pageMetadataRef.current);
+
+  // Single entry point for every page-navigation trigger (Prev/Next buttons,
+  // Alt+←/→). Flushes any unsaved header edits for the page being left — fixing
+  // header data not persisting across page switches — and treats leaving a page
+  // as verifying it, so Alt+V / the manual toggle are no longer required to
+  // progress through a document.
+  const changePage = useCallback((newPage: number) => {
+    if (newPage === currentPage) return;
+    if (editable && id) {
+      persistMetadata(currentPage, pageMetadataRef.current);
+      verificationApi.markPage(id, currentPage, true).then(refreshVState).catch(() => {});
+    }
+    setCurrentPage(newPage);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentPage, editable, id, refreshVState]);
 
   // Sync page metadata state when currentPage or docDetails changes
   useEffect(() => {
@@ -251,6 +322,9 @@ export const VerificationPage: React.FC = () => {
       });
     }
   }, [currentPage, docDetails]);
+
+  // Keep the metadata mirror in sync after every committed change.
+  useEffect(() => { pageMetadataRef.current = pageMetadata; }, [pageMetadata]);
 
   // Load Data
   useEffect(() => {
@@ -313,8 +387,9 @@ export const VerificationPage: React.FC = () => {
   }, [id, currentPage, lockedByMe, isSubmitted]);
 
   // Keyboard shortcuts so verifiers can work mouse-free:
-  //   Alt+→ / Alt+←  next / previous page
-  //   Alt+V          toggle the current page as verified
+  //   Alt+→ / Alt+←  next / previous page (also auto-verifies the page you leave)
+  //   Alt+V          manually toggle the current page's verified flag (optional —
+  //                  paging away already verifies it, this is just an override)
   //   Alt+Enter      submit the document (once every page is verified)
   // Alt-modified keys don't clash with AG Grid cell editing/navigation, so they
   // work even while a cell editor is focused.
@@ -325,11 +400,11 @@ export const VerificationPage: React.FC = () => {
       switch (e.key) {
         case 'ArrowRight':
           e.preventDefault();
-          setCurrentPage((prev) => Math.min(prev + 1, pages));
+          changePage(Math.min(currentPage + 1, pages));
           break;
         case 'ArrowLeft':
           e.preventDefault();
-          setCurrentPage((prev) => Math.max(prev - 1, 1));
+          changePage(Math.max(currentPage - 1, 1));
           break;
         case 'v':
         case 'V':
@@ -339,11 +414,7 @@ export const VerificationPage: React.FC = () => {
           }
           break;
         case 'Enter':
-          if (
-            editable &&
-            (vState?.total_pages || 0) > 0 &&
-            verifiedPageSet.size >= (vState?.total_pages || pages)
-          ) {
+          if (editable && canSubmit) {
             e.preventDefault();
             submitDoc();
           }
@@ -352,7 +423,7 @@ export const VerificationPage: React.FC = () => {
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [docDetails, editable, toggleCurrentPage, submitDoc, vState, verifiedPageSet]);
+  }, [docDetails, editable, toggleCurrentPage, submitDoc, changePage, currentPage, canSubmit]);
 
   // Pivot flat cell list into 2D row structures for AG Grid
   const gridData = useMemo(() => {
@@ -568,49 +639,6 @@ export const VerificationPage: React.FC = () => {
     setCells(prev => [...prev, ...newCells]);
   };
 
-  const handleSaveMetadata = async () => {
-    if (!id || !editable) return;
-    try {
-      setIsSavingMetadata(true);
-      await apiClient(`/api/documents/${id}/pages/${currentPage}`, {
-        method: 'PUT',
-        json: {
-          college_code: pageMetadata.college_code || null,
-          college_name: pageMetadata.college_name || null,
-          subject_code: pageMetadata.subject_code || null,
-          subject_name: pageMetadata.subject_name || null,
-          faculty: pageMetadata.faculty || null,
-          total_candidates: pageMetadata.total_candidates ? parseInt(pageMetadata.total_candidates as any) : null,
-        }
-      });
-
-      setDocDetails(prev => {
-        if (!prev) return null;
-        return {
-          ...prev,
-          pages: prev.pages.map(p => {
-            if (p.page_number === currentPage) {
-              return {
-                ...p,
-                college_code: pageMetadata.college_code,
-                college_name: pageMetadata.college_name,
-                subject_code: pageMetadata.subject_code,
-                subject_name: pageMetadata.subject_name,
-                faculty: pageMetadata.faculty,
-                total_candidates: pageMetadata.total_candidates,
-              };
-            }
-            return p;
-          })
-        };
-      });
-    } catch (err) {
-      console.error('Failed to save page metadata:', err);
-    } finally {
-      setIsSavingMetadata(false);
-    }
-  };
-
   // ---- cell helpers used by the editing + auto-fill logic ----
   const ZERO_BBOX = { x: 0, y: 0, width: 0, height: 0 };
   const cellAt = (list: CellRecord[], page: number, row: number, col: number) =>
@@ -750,13 +778,21 @@ export const VerificationPage: React.FC = () => {
         await Promise.all(writes.map(w =>
           persistRemote(currentPage, w.row, w.col, w.value, bboxAt(working, currentPage, w.row, w.col),
             { isInferred: w.isInferred, confidence: w.confidence, auto: true })));
-        writes.forEach(w => {
-          working = upsertLocal(working, currentPage, w.row, w.col, w.value,
-            { isInferred: w.isInferred, confidence: w.confidence, bbox: bboxAt(working, currentPage, w.row, w.col) });
-        });
       }
-      cellsRef.current = working;
-      setCells(working);
+
+      // Rebase onto the freshest local state before committing. `working` is a
+      // snapshot taken before the awaits above (persistRemote, examinersApi.lookup)
+      // — other rows may have been edited and already saved while we were waiting,
+      // and blindly writing back `working` would silently erase those edits (#2:
+      // typing a second mobile number reverts the first once this lookup resolves).
+      let latest = cellsRef.current;
+      latest = upsertLocal(latest, currentPage, rowIdx, colIdx, newValue, { bbox: editedBBox });
+      writes.forEach(w => {
+        latest = upsertLocal(latest, currentPage, w.row, w.col, w.value,
+          { isInferred: w.isInferred, confidence: w.confidence, bbox: bboxAt(working, currentPage, w.row, w.col) });
+      });
+      cellsRef.current = latest;
+      setCells(latest);
     } catch (err) {
       console.error('Failed to save cell correction:', err);
     } finally {
@@ -767,16 +803,19 @@ export const VerificationPage: React.FC = () => {
   // Run the auto Batch/Subject fill once when a page is opened (so existing data
   // rows get their sequence/subject even before the user touches anything).
   const syncAutoFields = async (page: number) => {
-    let working = cellsRef.current;
-    const writes = computeAutoWrites(working, page);
+    const base = cellsRef.current;
+    const writes = computeAutoWrites(base, page);
     if (!writes.length) return;
     try {
       setIsSaving(true);
       await Promise.all(writes.map(w =>
-        persistRemote(page, w.row, w.col, w.value, bboxAt(working, page, w.row, w.col), { auto: true })));
-      writes.forEach(w => { working = upsertLocal(working, page, w.row, w.col, w.value, { bbox: bboxAt(working, page, w.row, w.col) }); });
-      cellsRef.current = working;
-      setCells(working);
+        persistRemote(page, w.row, w.col, w.value, bboxAt(base, page, w.row, w.col), { auto: true })));
+      // Rebase onto the freshest state — the user may have started typing while
+      // this ran (see the identical fix in handleCellValueChanged above).
+      let latest = cellsRef.current;
+      writes.forEach(w => { latest = upsertLocal(latest, page, w.row, w.col, w.value, { bbox: bboxAt(base, page, w.row, w.col) }); });
+      cellsRef.current = latest;
+      setCells(latest);
     } catch (e) {
       console.error('Auto-field sync failed:', e);
     } finally {
@@ -991,7 +1030,7 @@ export const VerificationPage: React.FC = () => {
         {/* Page Selector Navigation */}
         <div className="flex items-center gap-2 bg-slate-950 border border-slate-800 px-3 py-1.5 rounded-lg select-none">
           <button
-            onClick={() => setCurrentPage(prev => Math.max(prev - 1, 1))}
+            onClick={() => changePage(Math.max(currentPage - 1, 1))}
             disabled={currentPage === 1}
             title="Previous page (Alt+←)"
             className="px-2 py-1 bg-slate-800 hover:bg-slate-700 disabled:bg-slate-900 disabled:text-slate-600 text-xs font-semibold rounded transition-all cursor-pointer disabled:cursor-not-allowed"
@@ -1002,7 +1041,7 @@ export const VerificationPage: React.FC = () => {
             Page {currentPage} of {totalPages}
           </span>
           <button
-            onClick={() => setCurrentPage(prev => Math.min(prev + 1, totalPages))}
+            onClick={() => changePage(Math.min(currentPage + 1, totalPages))}
             disabled={currentPage === totalPages}
             title="Next page (Alt+→)"
             className="px-2 py-1 bg-slate-800 hover:bg-slate-700 disabled:bg-slate-900 disabled:text-slate-600 text-xs font-semibold rounded transition-all cursor-pointer disabled:cursor-not-allowed"
@@ -1027,9 +1066,21 @@ export const VerificationPage: React.FC = () => {
 
           {/* Verification lock controls */}
           {isSubmitted ? (
-            <span className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-950 border border-emerald-900 rounded-lg text-xs font-semibold text-emerald-400">
-              <CheckCircle className="w-3.5 h-3.5" /> Submitted
-            </span>
+            <div className="flex items-center gap-2">
+              <span className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-950 border border-emerald-900 rounded-lg text-xs font-semibold text-emerald-400">
+                <CheckCircle className="w-3.5 h-3.5" /> Submitted
+              </span>
+              {canVerify && (
+                <button
+                  onClick={claimDoc}
+                  disabled={vBusy}
+                  title="Files can be verified more than once — reopening keeps whatever you submit next as the latest status"
+                  className="flex items-center gap-2 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 rounded-lg text-xs font-semibold text-slate-300 hover:text-white transition cursor-pointer disabled:opacity-50"
+                >
+                  <Lock className="w-3.5 h-3.5" /> Reopen to re-verify
+                </button>
+              )}
+            </div>
           ) : lockedByMe ? (
             <>
               <span className="px-2.5 py-1.5 bg-slate-950 border border-slate-800 rounded-lg text-xs font-semibold text-slate-300">
@@ -1044,8 +1095,8 @@ export const VerificationPage: React.FC = () => {
               </button>
               <button
                 onClick={submitDoc}
-                disabled={vBusy || !((vState?.total_pages || 0) > 0 && verifiedPageSet.size >= (vState?.total_pages || totalPages))}
-                title={verifiedPageSet.size < (vState?.total_pages || totalPages) ? 'Mark every page verified before submitting' : 'Submit verified document (Alt+Enter)'}
+                disabled={vBusy || !canSubmit}
+                title={canSubmit ? 'Submit verified document (Alt+Enter)' : 'Mark every page verified before submitting'}
                 className="flex items-center gap-2 px-4 py-1.5 bg-emerald-600 hover:bg-emerald-500 disabled:bg-emerald-900 disabled:text-emerald-600/60 rounded-lg text-xs font-semibold text-white transition shadow-lg shadow-emerald-600/20 cursor-pointer disabled:cursor-not-allowed disabled:shadow-none"
               >
                 <CheckCircle className="w-3.5 h-3.5" /> Submit
@@ -1068,13 +1119,17 @@ export const VerificationPage: React.FC = () => {
       </header>
 
       {/* Lock state banner */}
-      {!isSubmitted && !lockedByMe && (
+      {!lockedByMe && (
         <div className="bg-slate-900/80 border-b border-slate-800 px-6 py-2 text-xs text-slate-400 shrink-0">
           {vState?.locked_by
             ? `This file is being verified by ${vState.locked_by_name || 'another user'}. You are viewing it read-only.`
-            : canVerify
-              ? 'Read-only preview. Claim the file to lock it to you and start verifying.'
-              : 'You have read-only access to this document.'}
+            : isSubmitted
+              ? canVerify
+                ? 'This file has already been submitted. Reopen it to make corrections and resubmit — the latest submission is what counts.'
+                : 'This file has been submitted and is read-only.'
+              : canVerify
+                ? 'Read-only preview. Claim the file to lock it to you and start verifying.'
+                : 'You have read-only access to this document.'}
         </div>
       )}
 
@@ -1090,8 +1145,9 @@ export const VerificationPage: React.FC = () => {
 
       {/* Split-Screen Workspace */}
       <main className="flex-1 flex overflow-hidden p-6 gap-6">
-        {/* Left Panel: Image Canvas */}
-        <div className="w-1/2 h-full">
+        {/* Left Panel: Image Canvas — narrower than the editor so the grid (esp.
+            the Mobile Number column) never needs a horizontal scrollbar. */}
+        <div className="w-[45%] h-full shrink-0">
           <CanvasViewer
             imageUrl={imageUrl}
             cells={canvasCells}
@@ -1101,7 +1157,7 @@ export const VerificationPage: React.FC = () => {
         </div>
 
         {/* Right Panel: Spreadsheet Editor */}
-        <div className="w-1/2 h-full flex flex-col bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-2xl">
+        <div className="flex-1 min-w-0 h-full flex flex-col bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-2xl">
           {/* Metadata Form Section */}
           <div className="p-4 border-b border-slate-800 bg-slate-950/40">
             <div className="flex items-center gap-2 mb-3">
@@ -1204,7 +1260,7 @@ export const VerificationPage: React.FC = () => {
                   ? 'bg-emerald-950 border border-emerald-900 text-emerald-400'
                   : 'bg-slate-800 border border-slate-700 text-slate-300 hover:text-white disabled:opacity-50'
               }`}
-              title={editable ? 'Toggle this page as verified (Alt+V)' : 'Claim the file to mark pages verified'}
+              title={editable ? 'Changing page already marks it verified — use this only to unmark it (Alt+V)' : 'Claim the file to mark pages verified'}
             >
               <Check className="w-3.5 h-3.5" />
               {currentPageVerified ? `Page ${currentPage} verified` : `Mark page ${currentPage} verified`}
@@ -1218,10 +1274,10 @@ export const VerificationPage: React.FC = () => {
             </span>
             <span className="flex items-center gap-1"><Kbd>Enter</Kbd> next row</span>
             <span className="flex items-center gap-1"><Kbd>Tab</Kbd> next cell</span>
-            <span className="flex items-center gap-1"><Kbd>Alt</Kbd>+<Kbd>←</Kbd>/<Kbd>→</Kbd> change page</span>
+            <span className="flex items-center gap-1"><Kbd>Alt</Kbd>+<Kbd>←</Kbd>/<Kbd>→</Kbd> change page (auto-verifies it)</span>
             {editable && (
               <>
-                <span className="flex items-center gap-1"><Kbd>Alt</Kbd>+<Kbd>V</Kbd> mark page verified</span>
+                <span className="flex items-center gap-1"><Kbd>Alt</Kbd>+<Kbd>V</Kbd> unmark/mark page (optional)</span>
                 <span className="flex items-center gap-1"><Kbd>Alt</Kbd>+<Kbd>Enter</Kbd> submit</span>
               </>
             )}
